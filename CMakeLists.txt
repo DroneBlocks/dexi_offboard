@@ -10,6 +10,9 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(dexi_interfaces REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2 REQUIRED)
 
 include_directories(include)
 
@@ -26,7 +29,22 @@ ament_target_dependencies(
   "dexi_interfaces"
 )
 
-install(TARGETS px4_offboard_manager
+# PX4 Pose Publisher
+add_executable(px4_pose_publisher src/px4_pose_publisher.cpp)
+target_include_directories(px4_pose_publisher PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(px4_pose_publisher PUBLIC c_std_99 cxx_std_17)
+ament_target_dependencies(
+  px4_pose_publisher
+  "rclcpp"
+  "px4_msgs"
+  "geometry_msgs"
+  "tf2_ros"
+  "tf2"
+)
+
+install(TARGETS px4_offboard_manager px4_pose_publisher
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY
@@ -36,6 +54,7 @@ install(DIRECTORY
 
 install(DIRECTORY
   launch
+  rviz
   DESTINATION share/${PROJECT_NAME}
 )
 

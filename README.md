@@ -131,6 +131,28 @@ colcon build --packages-select dexi_offboard
 source install/setup.bash
 ```
 
+## 3D Visualization with RVIZ
+
+The package includes a pose publisher that converts PX4 odometry to standard ROS2 visualization messages.
+
+### Launch with Visualization
+```bash
+# Launch offboard manager with pose publisher
+ros2 launch dexi_offboard offboard_with_visualization.launch.py
+
+# In another terminal, start RVIZ
+rviz2 -d $(ros2 pkg prefix dexi_offboard)/share/dexi_offboard/rviz/dexi_visualization.rviz
+```
+
+### What You'll See in RVIZ
+- **Red arrow**: Current drone pose and orientation
+- **TF frames**: Coordinate system visualization
+- **Grid**: Reference coordinate plane
+
+### Available Visualization Topics
+- `/dexi/pose` - geometry_msgs/PoseStamped for current position
+- `/tf` - Transform tree showing drone coordinate frames
+
 ## Usage with Python and Node-RED
 
 See the `examples/` directory for:
