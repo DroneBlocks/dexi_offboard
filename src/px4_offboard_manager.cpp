@@ -290,8 +290,13 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 {
     const std::chrono::milliseconds sleep_duration(50);  // 20Hz
     while (offboard_heartbeat_thread_run_flag_) {
+        // Send offboard control mode
         offboard_heartbeat_.timestamp = getTimestamp();
         offboard_mode_publisher_->publish(offboard_heartbeat_);
+
+        // Send current position as trajectory setpoint to keep PX4 "Ready"
+        sendTrajectorySetpointPosition(x_, y_, z_, heading_);
+
         std::this_thread::sleep_for(sleep_duration);
     }
 }
