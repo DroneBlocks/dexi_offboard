@@ -259,6 +259,13 @@ void PX4OffboardManager::startOffboardHeartbeat()
     }
 
     RCLCPP_INFO(get_logger(), "Starting offboard heartbeat");
+
+    // Initialize target setpoints to current position
+    target_x_ = x_;
+    target_y_ = y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
+
     offboard_heartbeat_thread_run_flag_ = true;
     offboard_heartbeat_thread_ = std::make_unique<std::thread>(
         &PX4OffboardManager::sendOffboardHeartbeat, this);
@@ -294,8 +301,8 @@ void PX4OffboardManager::sendOffboardHeartbeat()
         offboard_heartbeat_.timestamp = getTimestamp();
         offboard_mode_publisher_->publish(offboard_heartbeat_);
 
-        // Send current position as trajectory setpoint to keep PX4 "Ready"
-        sendTrajectorySetpointPosition(x_, y_, z_, heading_);
+        // Send target setpoints to PX4 (use current position if no target set)
+        sendTrajectorySetpointPosition(target_x_, target_y_, target_z_, target_heading_);
 
         std::this_thread::sleep_for(sleep_duration);
     }
@@ -304,52 +311,74 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 // Movement methods
 void PX4OffboardManager::flyForward(float distance)
 {
-    float new_x = distance * std::cos(heading_) + x_;
-    float new_y = distance * std::sin(heading_) + y_;
-    sendTrajectorySetpointPosition(new_x, new_y, z_);
+    target_x_ = distance * std::cos(heading_) + x_;
+    target_y_ = distance * std::sin(heading_) + y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Setting target FORWARD: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyBackward(float distance)
 {
-    float new_x = distance * std::cos(heading_ + M_PI) + x_;
-    float new_y = distance * std::sin(heading_ + M_PI) + y_;
-    sendTrajectorySetpointPosition(new_x, new_y, z_);
+    target_x_ = distance * std::cos(heading_ + M_PI) + x_;
+    target_y_ = distance * std::sin(heading_ + M_PI) + y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Setting target BACKWARD: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyRight(float distance)
 {
-    float new_x = distance * std::cos(heading_ + M_PI_2) + x_;
-    float new_y = distance * std::sin(heading_ + M_PI_2) + y_;
-    sendTrajectorySetpointPosition(new_x, new_y, z_);
+    target_x_ = distance * std::cos(heading_ + M_PI_2) + x_;
+    target_y_ = distance * std::sin(heading_ + M_PI_2) + y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Setting target RIGHT: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyLeft(float distance)
 {
-    float new_x = distance * std::cos(heading_ - M_PI_2) + x_;
-    float new_y = distance * std::sin(heading_ - M_PI_2) + y_;
-    sendTrajectorySetpointPosition(new_x, new_y, z_);
+    target_x_ = distance * std::cos(heading_ - M_PI_2) + x_;
+    target_y_ = distance * std::sin(heading_ - M_PI_2) + y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Setting target LEFT: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyUp(float distance)
 {
-    sendTrajectorySetpointPosition(x_, y_, z_ - distance);
+    target_z_ = z_ - distance;  // Negative Z is up in NED
+    target_x_ = x_;
+    target_y_ = y_;
+    target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Setting altitude target: %.2f meters", -target_z_);
 }
 
 void PX4OffboardManager::flyDown(float distance)
 {
-    sendTrajectorySetpointPosition(x_, y_, z_ + distance);
+    target_z_ = z_ + distance;  // Positive Z is down in NED
+    target_x_ = x_;
+    target_y_ = y_;
+    target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Setting altitude target: %.2f meters", -target_z_);
 }
 
 void PX4OffboardManager::yawLeft(float angle)
 {
-    float new_heading = heading_ - angle * M_PI / 180.0f;
-    sendTrajectorySetpointPosition(x_, y_, z_, new_heading);
+    target_heading_ = heading_ - angle * M_PI / 180.0f;
+    target_x_ = x_;
+    target_y_ = y_;
+    target_z_ = z_;
+    RCLCPP_INFO(get_logger(), "Setting yaw target: %.2f degrees", target_heading_ * 180.0f / M_PI);
 }
 
 void PX4OffboardManager::yawRight(float angle)
 {
-    float new_heading = heading_ + angle * M_PI / 180.0f;
-    sendTrajectorySetpointPosition(x_, y_, z_, new_heading);
+    target_heading_ = heading_ + angle * M_PI / 180.0f;
+    target_x_ = x_;
+    target_y_ = y_;
+    target_z_ = z_;
+    RCLCPP_INFO(get_logger(), "Setting yaw target: %.2f degrees", target_heading_ * 180.0f / M_PI);
 }
 
 // Main function

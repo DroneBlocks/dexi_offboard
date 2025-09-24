@@ -45,6 +45,9 @@ private:
     double lat_{0.0}, lon_{0.0}, alt_{0.0};
     double x_{0.0}, y_{0.0}, z_{0.0}, heading_{0.0};
 
+    // Target setpoints for offboard control
+    double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
+
     // Offboard control
     std::atomic<bool> offboard_heartbeat_thread_run_flag_{false};
     std::unique_ptr<std::thread> offboard_heartbeat_thread_;

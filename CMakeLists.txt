@@ -44,7 +44,19 @@ ament_target_dependencies(
   "tf2"
 )
 
-install(TARGETS px4_offboard_manager px4_pose_publisher
+# Keyboard Teleop
+add_executable(keyboard_teleop src/keyboard_teleop.cpp)
+target_include_directories(keyboard_teleop PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>)
+target_compile_features(keyboard_teleop PUBLIC c_std_99 cxx_std_17)
+ament_target_dependencies(
+  keyboard_teleop
+  "rclcpp"
+  "dexi_interfaces"
+)
+
+install(TARGETS px4_offboard_manager px4_pose_publisher keyboard_teleop
   DESTINATION lib/${PROJECT_NAME})
 
 install(DIRECTORY

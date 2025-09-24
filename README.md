@@ -153,6 +153,47 @@ rviz2 -d $(ros2 pkg prefix dexi_offboard)/share/dexi_offboard/rviz/dexi_visualiz
 - `/dexi/pose` - geometry_msgs/PoseStamped for current position
 - `/tf` - Transform tree showing drone coordinate frames
 
+## Keyboard Teleop Control
+
+Real-time transmitter-style keyboard control for immediate drone responses:
+
+### Launch Keyboard Teleop
+```bash
+# Launch complete system with teleop
+ros2 launch dexi_offboard teleop_control.launch.py
+
+# OR run teleop separately
+ros2 run dexi_offboard keyboard_teleop
+```
+
+### Transmitter-Style Controls
+
+**LEFT STICK (Throttle/Yaw):**
+- **W** / **w** : THROTTLE UP (Move UP 1.0m)
+- **S** / **s** : THROTTLE DOWN (Move DOWN 1.0m)
+- **A** / **a** : YAW LEFT (15°)
+- **D** / **d** : YAW RIGHT (15°)
+
+**RIGHT STICK (Pitch/Roll) - Arrow Keys:**
+- **↑** : PITCH FORWARD (Move FORWARD 1.0m)
+- **↓** : PITCH BACKWARD (Move BACKWARD 1.0m)
+- **←** : ROLL LEFT (Move LEFT 1.0m)
+- **→** : ROLL RIGHT (Move RIGHT 1.0m)
+
+**System Controls:**
+- **H** / **h** : Show help
+- **Q** / **q** : Quit teleop
+
+### Features
+- ✅ **Transmitter mapping** - familiar left/right stick layout
+- ✅ **Real-time response** - no need to press Enter
+- ✅ **Position setpoints** - smooth, controlled movement
+- ✅ **Safe increments** - 1m steps for position, 15° for yaw
+- ✅ **PX4 handles control** - automatic speed/acceleration management
+- ✅ **Arrow key support** - proper escape sequence detection
+
+**Before using teleop, ensure offboard heartbeat is started!**
+
 ## Usage with Python and Node-RED
 
 See the `examples/` directory for:
