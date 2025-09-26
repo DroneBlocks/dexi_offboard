@@ -35,8 +35,11 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 # 2. Arm the vehicle
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
 
-# 3. Takeoff to 2 meters
+# 3. Takeoff to 2 meters (standard PX4 auto mode)
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'takeoff', distance_or_degrees: 2.0}"
+
+# OR 3. Offboard Takeoff (pure offboard mode with altitude setpoints)
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'offboard_takeoff', distance_or_degrees: 2.0}"
 
 # 4. Land
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
@@ -55,8 +58,13 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 - `stop_offboard_heartbeat` - Stop offboard mode heartbeat
 - `arm` - Arm the vehicle
 - `disarm` - Disarm the vehicle
-- `takeoff` - Takeoff to specified altitude (meters)
+- `takeoff` - Takeoff to specified altitude (meters) - uses PX4 auto takeoff mode
+- `offboard_takeoff` - Takeoff using offboard mode altitude setpoints (meters)
 - `land` - Land at current position
+
+**Takeoff Mode Comparison:**
+- **`takeoff`**: Uses PX4's built-in auto takeoff mode. Temporarily switches from offboard to auto mode for takeoff, then you need to manually switch back to offboard for further control.
+- **`offboard_takeoff`**: Stays in offboard mode throughout. Uses altitude setpoints for smooth ascent. Automatically starts offboard heartbeat if not running. Best for continuous offboard flight sequences.
 
 ### Movement Commands
 - `fly_forward` - Move forward by specified distance (meters)

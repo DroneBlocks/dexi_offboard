@@ -138,6 +138,8 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
         disarm();
     } else if (msg->command == "takeoff") {
         takeoff(distance_or_degrees);
+    } else if (msg->command == "offboard_takeoff") {
+        offboardTakeoff(distance_or_degrees);
     } else if (msg->command == "land") {
         land();
     } else if (msg->command == "fly_forward") {
@@ -215,6 +217,27 @@ void PX4OffboardManager::takeoff(float altitude)
     msg.param6 = NAN;
     msg.param7 = altitude + static_cast<float>(alt_);
     sendVehicleCommand(msg);
+}
+
+void PX4OffboardManager::offboardTakeoff(float altitude)
+{
+    RCLCPP_INFO(get_logger(), "Starting offboard takeoff to %.2f meters", altitude);
+
+    // Start offboard heartbeat if not already running
+    if (!offboard_heartbeat_thread_run_flag_) {
+        startOffboardHeartbeat();
+        // Brief delay to ensure offboard mode is established
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    // Set target altitude setpoint (negative Z is up in NED frame)
+    target_z_ = z_ - altitude;  // Current altitude minus desired climb
+    target_x_ = x_;             // Hold current X position
+    target_y_ = y_;             // Hold current Y position
+    target_heading_ = heading_; // Hold current heading
+
+    RCLCPP_INFO(get_logger(), "Offboard takeoff setpoint: target_z=%.2f (climb %.2f meters)",
+                target_z_, altitude);
 }
 
 void PX4OffboardManager::land()

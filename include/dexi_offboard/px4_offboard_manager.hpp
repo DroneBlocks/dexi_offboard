@@ -69,6 +69,7 @@ private:
     void arm();
     void disarm();
     void takeoff(float altitude);
+    void offboardTakeoff(float altitude);
     void land();
     void enableOffboardMode();
     void enableHoldMode();
