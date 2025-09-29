@@ -14,6 +14,9 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
     initializeSubscribers();
     initializeTimer();
 
+    // Initialize mission controller
+    mission_controller_ = std::make_unique<MissionController>();
+
     // Initialize offboard heartbeat message
     offboard_heartbeat_.position = true;
     offboard_heartbeat_.velocity = false;
@@ -121,6 +124,72 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
     y_ = msg->y;
     z_ = msg->z;
     heading_ = msg->heading;
+
+    // Check if target is reached after position update
+    if (target_active_ && isTargetReached()) {
+        RCLCPP_INFO(get_logger(), "Target reached! Position: (%.2f, %.2f, %.2f), Heading: %.2f°",
+                   x_, y_, z_, heading_ * 180.0 / M_PI);
+        clearTarget();
+    }
+}
+
+bool PX4OffboardManager::isTargetReached()
+{
+    if (!target_active_) return false;
+
+    // Calculate position distance
+    double dx = x_ - target_x_;
+    double dy = y_ - target_y_;
+    double dz = z_ - target_z_;
+    double position_error = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+    // Calculate heading error (handle wraparound)
+    double heading_error = std::abs(heading_ - target_heading_);
+    if (heading_error > M_PI) {
+        heading_error = 2.0 * M_PI - heading_error;
+    }
+
+    return (position_error <= position_tolerance_) && (heading_error <= heading_tolerance_);
+}
+
+void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
+{
+    target_x_ = x;
+    target_y_ = y;
+    target_z_ = z;
+    target_heading_ = heading;
+    target_active_ = true;
+
+    RCLCPP_INFO(get_logger(), "Target set: (%.2f, %.2f, %.2f), Heading: %.2f°",
+               x, y, z, heading * 180.0 / M_PI);
+}
+
+void PX4OffboardManager::clearTarget()
+{
+    target_active_ = false;
+    RCLCPP_DEBUG(get_logger(), "Target cleared");
+
+    // Check if we have an active mission
+    if (mission_controller_->isMissionActive()) {
+        mission_controller_->waypointReached();
+
+        // Add delay before next waypoint for drone settling
+        if (mission_controller_->hasNextWaypoint()) {
+            RCLCPP_INFO(get_logger(), "Waypoint reached! Settling for %.1f seconds before next waypoint...",
+                       mission_waypoint_delay_);
+
+            mission_delay_timer_ = create_wall_timer(
+                std::chrono::milliseconds(static_cast<int>(mission_waypoint_delay_ * 1000)),
+                [this]() {
+                    executeMission();  // Continue to next waypoint after delay
+                    mission_delay_timer_->cancel();  // Stop the timer
+                }
+            );
+        } else {
+            // No more waypoints, mission complete
+            RCLCPP_INFO(get_logger(), "Mission completed!");
+        }
+    }
 }
 
 void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg)
@@ -158,6 +227,13 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
         yawLeft(distance_or_degrees);
     } else if (msg->command == "yaw_right") {
         yawRight(distance_or_degrees);
+    } else if (msg->command == "box_mission") {
+        startBoxMission(distance_or_degrees);
+    } else if (msg->command == "stop_mission") {
+        stopMission();
+    } else if (msg->command == "set_mission_delay") {
+        mission_waypoint_delay_ = distance_or_degrees;
+        RCLCPP_INFO(get_logger(), "Mission waypoint delay set to %.1f seconds", mission_waypoint_delay_);
     } else {
         RCLCPP_WARN(get_logger(), "Unknown command: %s", msg->command.c_str());
     }
@@ -242,9 +318,20 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
 
 void PX4OffboardManager::land()
 {
+    // Stop any active mission first
+    if (mission_controller_->isMissionActive()) {
+        stopMission();
+    }
+
+    // Stop offboard heartbeat since we're switching to auto land mode
+    stopOffboardHeartbeat();
+
+    // Send land command to PX4
     px4_msgs::msg::VehicleCommand msg{};
     msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_NAV_LAND;
     sendVehicleCommand(msg);
+
+    RCLCPP_INFO(get_logger(), "Landing initiated - offboard heartbeat stopped");
 }
 
 void PX4OffboardManager::enableOffboardMode()
@@ -334,74 +421,103 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 // Movement methods
 void PX4OffboardManager::flyForward(float distance)
 {
-    target_x_ = distance * std::cos(heading_) + x_;
-    target_y_ = distance * std::sin(heading_) + y_;
-    target_z_ = z_;
-    target_heading_ = heading_;
-    RCLCPP_INFO(get_logger(), "Setting target FORWARD: %.2f meters", distance);
+    double new_x = distance * std::cos(heading_) + x_;
+    double new_y = distance * std::sin(heading_) + y_;
+    setTarget(new_x, new_y, z_, heading_);
+    RCLCPP_INFO(get_logger(), "Flying FORWARD: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyBackward(float distance)
 {
-    target_x_ = distance * std::cos(heading_ + M_PI) + x_;
-    target_y_ = distance * std::sin(heading_ + M_PI) + y_;
-    target_z_ = z_;
-    target_heading_ = heading_;
-    RCLCPP_INFO(get_logger(), "Setting target BACKWARD: %.2f meters", distance);
+    double new_x = distance * std::cos(heading_ + M_PI) + x_;
+    double new_y = distance * std::sin(heading_ + M_PI) + y_;
+    setTarget(new_x, new_y, z_, heading_);
+    RCLCPP_INFO(get_logger(), "Flying BACKWARD: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyRight(float distance)
 {
-    target_x_ = distance * std::cos(heading_ + M_PI_2) + x_;
-    target_y_ = distance * std::sin(heading_ + M_PI_2) + y_;
-    target_z_ = z_;
-    target_heading_ = heading_;
-    RCLCPP_INFO(get_logger(), "Setting target RIGHT: %.2f meters", distance);
+    double new_x = distance * std::cos(heading_ + M_PI_2) + x_;
+    double new_y = distance * std::sin(heading_ + M_PI_2) + y_;
+    setTarget(new_x, new_y, z_, heading_);
+    RCLCPP_INFO(get_logger(), "Flying RIGHT: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyLeft(float distance)
 {
-    target_x_ = distance * std::cos(heading_ - M_PI_2) + x_;
-    target_y_ = distance * std::sin(heading_ - M_PI_2) + y_;
-    target_z_ = z_;
-    target_heading_ = heading_;
-    RCLCPP_INFO(get_logger(), "Setting target LEFT: %.2f meters", distance);
+    double new_x = distance * std::cos(heading_ - M_PI_2) + x_;
+    double new_y = distance * std::sin(heading_ - M_PI_2) + y_;
+    setTarget(new_x, new_y, z_, heading_);
+    RCLCPP_INFO(get_logger(), "Flying LEFT: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyUp(float distance)
 {
-    target_z_ = z_ - distance;  // Negative Z is up in NED
-    target_x_ = x_;
-    target_y_ = y_;
-    target_heading_ = heading_;
-    RCLCPP_INFO(get_logger(), "Setting altitude target: %.2f meters", -target_z_);
+    double new_z = z_ - distance;  // Negative Z is up in NED
+    setTarget(x_, y_, new_z, heading_);
+    RCLCPP_INFO(get_logger(), "Flying UP: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyDown(float distance)
 {
-    target_z_ = z_ + distance;  // Positive Z is down in NED
-    target_x_ = x_;
-    target_y_ = y_;
-    target_heading_ = heading_;
-    RCLCPP_INFO(get_logger(), "Setting altitude target: %.2f meters", -target_z_);
+    double new_z = z_ + distance;  // Positive Z is down in NED
+    setTarget(x_, y_, new_z, heading_);
+    RCLCPP_INFO(get_logger(), "Flying DOWN: %.2f meters", distance);
 }
 
 void PX4OffboardManager::yawLeft(float angle)
 {
-    target_heading_ = heading_ - angle * M_PI / 180.0f;
-    target_x_ = x_;
-    target_y_ = y_;
-    target_z_ = z_;
-    RCLCPP_INFO(get_logger(), "Setting yaw target: %.2f degrees", target_heading_ * 180.0f / M_PI);
+    double new_heading = heading_ - angle * M_PI / 180.0f;
+    setTarget(x_, y_, z_, new_heading);
+    RCLCPP_INFO(get_logger(), "Yawing LEFT: %.2f degrees", angle);
 }
 
 void PX4OffboardManager::yawRight(float angle)
 {
-    target_heading_ = heading_ + angle * M_PI / 180.0f;
-    target_x_ = x_;
-    target_y_ = y_;
-    target_z_ = z_;
-    RCLCPP_INFO(get_logger(), "Setting yaw target: %.2f degrees", target_heading_ * 180.0f / M_PI);
+    double new_heading = heading_ + angle * M_PI / 180.0f;
+    setTarget(x_, y_, z_, new_heading);
+    RCLCPP_INFO(get_logger(), "Yawing RIGHT: %.2f degrees", angle);
+}
+
+// Mission control methods
+void PX4OffboardManager::startBoxMission(float size)
+{
+    mission_controller_->createBoxMission(size, x_, y_, z_);
+
+    auto target_callback = [this]() {
+        RCLCPP_INFO(get_logger(), "Waypoint reached! Continuing mission...");
+    };
+
+    auto complete_callback = [this]() {
+        RCLCPP_INFO(get_logger(), "Mission completed!");
+    };
+
+    mission_controller_->startMission(target_callback, complete_callback);
+
+    RCLCPP_INFO(get_logger(), "Starting box mission: %.2fm x %.2fm at current altitude %.2fm",
+               size, size, -z_);  // Display positive altitude (negative Z in NED)
+
+    executeMission();
+}
+
+void PX4OffboardManager::stopMission()
+{
+    mission_controller_->stopMission();
+    clearTarget();
+    RCLCPP_INFO(get_logger(), "Mission stopped");
+}
+
+void PX4OffboardManager::executeMission()
+{
+    if (!mission_controller_->isMissionActive() || !mission_controller_->hasNextWaypoint()) {
+        return;
+    }
+
+    Waypoint next = mission_controller_->getNextWaypoint();
+    setTarget(next.x, next.y, next.z, next.heading);
+
+    RCLCPP_INFO(get_logger(), "Executing waypoint: %s -> (%.2f, %.2f, %.2f)",
+               next.description.c_str(), next.x, next.y, next.z);
 }
 
 // Main function

@@ -78,6 +78,19 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 - `yaw_left` - Rotate left by specified angle (degrees)
 - `yaw_right` - Rotate right by specified angle (degrees)
 
+### Mission Control
+- `box_mission` - Execute automated box flight pattern (size in meters)
+- `stop_mission` - Stop current mission execution
+- `set_mission_delay` - Set delay between waypoints (seconds, default: 1.0)
+
+**Mission Features:**
+- ✅ **Automatic waypoint progression** - Target reached detection + settling delay
+- ✅ **Target reached detection** - 30cm position tolerance, 5.7° heading tolerance
+- ✅ **Waypoint settling delay** - 1 second pause between waypoints for stability
+- ✅ **Configurable delays** - Adjust settling time as needed
+- ✅ **Box mission pattern** - Fly forward → right → backward → left
+- ✅ **Mission status logging** - Real-time waypoint and completion notifications
+
 ## Command Line Examples
 
 ### Example Flight Pattern
@@ -104,6 +117,34 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 sleep 3
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
 sleep 5
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
+```
+
+### Automated Box Mission
+
+```bash
+# Start offboard mode and arm
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
+
+# Takeoff using offboard mode
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'offboard_takeoff', distance_or_degrees: 2.0}"
+
+# Optional: Set custom delay between waypoints (default is 1.0 seconds)
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'set_mission_delay', distance_or_degrees: 2.0}"
+
+# Execute automated 5m x 5m box mission at current altitude
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'box_mission', distance_or_degrees: 5.0}"
+
+# The drone will automatically:
+# 1. Fly forward 5m at current altitude → target reached → settle 2.0s
+# 2. Fly right 5m at current altitude → target reached → settle 2.0s
+# 3. Fly backward 5m at current altitude → target reached → settle 2.0s
+# 4. Fly left 5m back to start at current altitude → target reached → mission complete!
+
+# Land and disarm
+ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
 ```

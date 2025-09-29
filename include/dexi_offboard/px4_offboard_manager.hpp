@@ -9,6 +9,7 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
+#include "dexi_offboard/mission_controller.hpp"
 #include <thread>
 #include <atomic>
 #include <queue>
@@ -48,6 +49,16 @@ private:
     // Target setpoints for offboard control
     double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
 
+    // Target reached detection
+    bool target_active_{false};
+    double position_tolerance_{0.3};  // meters
+    double heading_tolerance_{0.1};   // radians (~5.7 degrees)
+
+    // Mission controller
+    std::unique_ptr<MissionController> mission_controller_;
+    rclcpp::TimerBase::SharedPtr mission_delay_timer_;
+    double mission_waypoint_delay_{1.0};  // seconds between waypoints
+
     // Offboard control
     std::atomic<bool> offboard_heartbeat_thread_run_flag_{false};
     std::unique_ptr<std::thread> offboard_heartbeat_thread_;
@@ -84,6 +95,16 @@ private:
     void flyDown(float distance);
     void yawLeft(float angle);
     void yawRight(float angle);
+
+    // Target reached detection
+    bool isTargetReached();
+    void setTarget(double x, double y, double z, double heading);
+    void clearTarget();
+
+    // Mission control
+    void startBoxMission(float size);
+    void stopMission();
+    void executeMission();
 
     // Utility methods
     uint64_t getTimestamp();
