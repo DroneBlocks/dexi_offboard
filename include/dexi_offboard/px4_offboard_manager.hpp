@@ -59,6 +59,9 @@ private:
     rclcpp::TimerBase::SharedPtr mission_delay_timer_;
     double mission_waypoint_delay_{1.0};  // seconds between waypoints
 
+    // Parameters
+    bool keyboard_control_enabled_{false};
+
     // Offboard control
     std::atomic<bool> offboard_heartbeat_thread_run_flag_{false};
     std::unique_ptr<std::thread> offboard_heartbeat_thread_;

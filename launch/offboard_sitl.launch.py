@@ -15,8 +15,11 @@ def generate_launch_description():
         Node(
             package='dexi_offboard',
             executable='px4_offboard_manager',
-            name='offboard_manager',
+            name='px4_offboard_manager',
             namespace='dexi',
-            output='screen'
+            output='screen',
+            parameters=[{
+                'keyboard_control_enabled': True
+            }],
         )
     ]) 

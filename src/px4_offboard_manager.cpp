@@ -4,6 +4,13 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
 : Node("px4_offboard_manager", options),
   qos_profile_(1)
 {
+    // Declare parameters
+    this->declare_parameter("keyboard_control_enabled", false);
+    
+    // Get parameter value
+    keyboard_control_enabled_ = this->get_parameter("keyboard_control_enabled").as_bool();
+    RCLCPP_INFO(get_logger(), "Keyboard control enabled: %s", keyboard_control_enabled_ ? "true" : "false");
+
     // Configure QoS profile
     qos_profile_ = qos_profile_.best_effort()
                               .transient_local()
