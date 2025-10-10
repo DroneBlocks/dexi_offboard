@@ -313,14 +313,27 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
 
+    // Wait for valid heading data (up to 2 seconds)
+    // Heading of exactly 0.0 likely means we haven't received position data yet
+    auto start_time = std::chrono::steady_clock::now();
+    while (heading_ == 0.0 && x_ == 0.0 && y_ == 0.0 && z_ == 0.0) {
+        auto elapsed = std::chrono::steady_clock::now() - start_time;
+        if (elapsed > std::chrono::seconds(2)) {
+            RCLCPP_WARN(get_logger(), "No valid position/heading received after 2s, using current values");
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
     // Set target altitude setpoint (negative Z is up in NED frame)
     target_z_ = z_ - altitude;  // Current altitude minus desired climb
     target_x_ = x_;             // Hold current X position
     target_y_ = y_;             // Hold current Y position
     target_heading_ = heading_; // Hold current heading
+    target_active_ = true;      // Mark target as active
 
-    RCLCPP_INFO(get_logger(), "Offboard takeoff setpoint: target_z=%.2f (climb %.2f meters)",
-                target_z_, altitude);
+    RCLCPP_INFO(get_logger(), "Offboard takeoff setpoint: target_z=%.2f (climb %.2f meters), heading=%.2f rad",
+                target_z_, altitude, target_heading_);
 }
 
 void PX4OffboardManager::land()
