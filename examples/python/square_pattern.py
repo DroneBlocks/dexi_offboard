@@ -4,9 +4,9 @@ DEXI square flight pattern example
 
 This example demonstrates more complex flight patterns using the DEXI offboard manager.
 The drone will:
-1. Arm and takeoff
+1. Arm and takeoff using offboard mode
 2. Fly a square pattern (forward, right, backward, left)
-3. Return to start position
+3. Perform a 360-degree rotation
 4. Land and disarm
 
 Usage:
@@ -16,10 +16,15 @@ Requirements:
     - ROS2 environment sourced
     - dexi_offboard node running
     - dexi_interfaces package available
+
+Note:
+    This script uses 'offboard_takeoff' to maintain offboard mode throughout the flight,
+    ensuring all movement commands (fly_forward, fly_right, etc.) work correctly.
 """
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from dexi_interfaces.msg import OffboardNavCommand
 import time
 
@@ -28,11 +33,19 @@ class SquarePatternFlight(Node):
     def __init__(self):
         super().__init__('square_pattern_flight')
 
+        # Configure QoS to match offboard manager
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
         # Create publisher for offboard commands
         self.cmd_publisher = self.create_publisher(
             OffboardNavCommand,
             '/dexi/offboard_manager',
-            10
+            qos_profile
         )
 
         # Flight parameters
@@ -66,9 +79,9 @@ class SquarePatternFlight(Node):
             self.send_command("start_offboard_heartbeat", wait_time=3.0)
             self.send_command("arm", wait_time=3.0)
 
-            # 2. Takeoff
-            self.get_logger().info(f"Taking off to {self.takeoff_altitude} meters")
-            self.send_command("takeoff", distance_or_degrees=self.takeoff_altitude, wait_time=8.0)
+            # 2. Takeoff using offboard mode
+            self.get_logger().info(f"Taking off to {self.takeoff_altitude} meters (offboard mode)")
+            self.send_command("offboard_takeoff", distance_or_degrees=self.takeoff_altitude, wait_time=8.0)
 
             # 3. Stabilize after takeoff
             self.get_logger().info("Stabilizing position...")

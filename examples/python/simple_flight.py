@@ -6,9 +6,10 @@ This example demonstrates the basic flight sequence using the DEXI offboard mana
 It shows how to:
 1. Start offboard heartbeat
 2. Arm the vehicle
-3. Takeoff to a specified altitude
-4. Land
-5. Disarm and stop heartbeat
+3. Takeoff to a specified altitude (using offboard mode)
+4. Hold position
+5. Land
+6. Disarm and stop heartbeat
 
 Usage:
     python3 simple_flight.py
@@ -17,10 +18,15 @@ Requirements:
     - ROS2 environment sourced
     - dexi_offboard node running
     - dexi_interfaces package available
+
+Note:
+    This script uses 'offboard_takeoff' to keep the drone in offboard mode throughout
+    the entire flight sequence, ensuring all commands work seamlessly without mode switching.
 """
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from dexi_interfaces.msg import OffboardNavCommand
 import time
 
@@ -29,11 +35,19 @@ class SimpleFlight(Node):
     def __init__(self):
         super().__init__('simple_flight_example')
 
+        # Configure QoS to match offboard manager
+        qos_profile = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
         # Create publisher for offboard commands
         self.cmd_publisher = self.create_publisher(
             OffboardNavCommand,
             '/dexi/offboard_manager',
-            10
+            qos_profile
         )
 
         # Wait for publisher to be ready
@@ -65,9 +79,9 @@ class SimpleFlight(Node):
             self.get_logger().info("Step 2: Arming vehicle")
             self.send_command("arm", wait_time=3.0)
 
-            # 3. Takeoff to 2 meters
-            self.get_logger().info("Step 3: Taking off to 2 meters")
-            self.send_command("takeoff", distance_or_degrees=2.0, wait_time=8.0)
+            # 3. Takeoff to 2 meters using offboard mode
+            self.get_logger().info("Step 3: Taking off to 2 meters (offboard mode)")
+            self.send_command("offboard_takeoff", distance_or_degrees=2.0, wait_time=8.0)
 
             # 4. Hold position for a moment
             self.get_logger().info("Step 4: Holding position for 5 seconds")
