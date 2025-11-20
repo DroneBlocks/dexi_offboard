@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DroneBlocks Box Mission Example</title>
+    <script src="https://cdn.jsdelivr.net/npm/roslib@1/build/roslib.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .button {
+            background-color: #4CAF50;
+            border: none;
+            color: white;
+            padding: 15px 32px;
+            text-align: center;
+            font-size: 16px;
+            margin: 10px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .log {
+            background-color: #f4f4f4;
+            border: 1px solid #ddd;
+            padding: 15px;
+            margin-top: 20px;
+            height: 300px;
+            overflow-y: scroll;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-info { color: #2196F3; }
+        .log-success { color: #4CAF50; font-weight: bold; }
+        .log-error { color: #f44336; font-weight: bold; }
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        .status.connected { background-color: #d4edda; color: #155724; }
+        .status.disconnected { background-color: #f8d7da; color: #721c24; }
+    </style>
+</head>
+<body>
+    <h1>DroneBlocks Box Mission Example</h1>
+
+    <div id="status" class="status disconnected">
+        Status: Disconnected
+    </div>
+
+    <button id="connectBtn" class="button" onclick="connect()">Connect to ROS</button>
+    <button id="missionBtn" class="button" onclick="runBoxMission()" disabled>Launch Box Mission</button>
+
+    <div class="log" id="logOutput"></div>
+
+    <script>
+        let ros;
+        let executeCommandService;
+        let missionRunning = false;
+
+        // Log messages to the console
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('logOutput');
+            const timestamp = new Date().toLocaleTimeString();
+            const className = `log-${type}`;
+            logDiv.innerHTML += `<div class="${className}">[${timestamp}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        // Connect to rosbridge
+        function connect() {
+            log('Connecting to rosbridge...', 'info');
+
+            ros = new ROSLIB.Ros({
+                url: 'ws://localhost:9090'  // Change this to your rosbridge WebSocket URL
+            });
+
+            ros.on('connection', function() {
+                log('Connected to rosbridge!', 'success');
+                document.getElementById('status').className = 'status connected';
+                document.getElementById('status').textContent = 'Status: Connected';
+                document.getElementById('connectBtn').disabled = true;
+                document.getElementById('missionBtn').disabled = false;
+
+                // Create service client
+                executeCommandService = new ROSLIB.Service({
+                    ros: ros,
+                    name: '/dexi/execute_blockly_command',
+                    serviceType: 'dexi_interfaces/srv/ExecuteBlocklyCommand'
+                });
+
+                log('Service client ready', 'info');
+            });
+
+            ros.on('error', function(error) {
+                log('Error connecting to rosbridge: ' + error, 'error');
+            });
+
+            ros.on('close', function() {
+                log('Connection to rosbridge closed', 'error');
+                document.getElementById('status').className = 'status disconnected';
+                document.getElementById('status').textContent = 'Status: Disconnected';
+                document.getElementById('connectBtn').disabled = false;
+                document.getElementById('missionBtn').disabled = true;
+            });
+        }
+
+        // Execute a single command
+        function executeCommand(command, parameter = 0.0, timeout = 30.0) {
+            return new Promise((resolve, reject) => {
+                log(`Sending command: ${command} (param: ${parameter})`, 'info');
+
+                const request = new ROSLIB.ServiceRequest({
+                    command: command,
+                    parameter: parameter,
+                    timeout: timeout
+                });
+
+                executeCommandService.callService(request, function(result) {
+                    if (result.success) {
+                        log(`✓ ${command} completed in ${result.execution_time.toFixed(2)}s - ${result.message}`, 'success');
+                        resolve(result);
+                    } else {
+                        log(`✗ ${command} FAILED: ${result.message}`, 'error');
+                        reject(result);
+                    }
+                }, function(error) {
+                    log(`✗ Service call failed: ${error}`, 'error');
+                    reject(error);
+                });
+            });
+        }
+
+        // Run the complete box mission
+        async function runBoxMission() {
+            if (missionRunning) {
+                log('Mission already running!', 'error');
+                return;
+            }
+
+            missionRunning = true;
+            document.getElementById('missionBtn').disabled = true;
+
+            try {
+                log('========== STARTING BOX MISSION ==========', 'info');
+
+                // 1. Start offboard heartbeat
+                await executeCommand('start_offboard_heartbeat');
+
+                // 2. Arm the drone
+                await executeCommand('arm');
+
+                // 3. Takeoff to 3 meters
+                await executeCommand('offboard_takeoff', 3.0, 15.0);
+
+                // 4. Fly in a 1m x 1m box pattern
+                log('Starting box pattern (1m x 1m)...', 'info');
+
+                await executeCommand('fly_forward', 1.0, 10.0);
+                await executeCommand('fly_right', 1.0, 10.0);
+                await executeCommand('fly_backward', 1.0, 10.0);
+                await executeCommand('fly_left', 1.0, 10.0);
+
+                log('Box pattern completed!', 'success');
+
+                // 5. Land
+                await executeCommand('land');
+
+                log('========== MISSION COMPLETED SUCCESSFULLY ==========', 'success');
+
+            } catch (error) {
+                log('========== MISSION FAILED ==========', 'error');
+                console.error(error);
+            } finally {
+                missionRunning = false;
+                document.getElementById('missionBtn').disabled = false;
+            }
+        }
+
+        // Example: How to execute individual blocks from Blockly
+        // This shows how DroneBlocks would send blocks one at a time
+        async function executeBlocklyBlocks(blocks) {
+            /*
+            Example blocks array:
+            [
+                { command: 'start_offboard_heartbeat', parameter: 0.0, timeout: 5.0 },
+                { command: 'arm', parameter: 0.0, timeout: 5.0 },
+                { command: 'offboard_takeoff', parameter: 3.0, timeout: 15.0 },
+                { command: 'fly_forward', parameter: 2.0, timeout: 10.0 },
+                { command: 'yaw_right', parameter: 90.0, timeout: 10.0 },
+                { command: 'land', parameter: 0.0, timeout: 20.0 }
+            ]
+            */
+
+            for (let i = 0; i < blocks.length; i++) {
+                const block = blocks[i];
+                log(`Executing block ${i + 1}/${blocks.length}`, 'info');
+
+                try {
+                    await executeCommand(block.command, block.parameter, block.timeout);
+                } catch (error) {
+                    log(`Block ${i + 1} failed, stopping mission`, 'error');
+                    throw error;
+                }
+            }
+
+            log('All blocks completed!', 'success');
+        }
+    </script>
+</body>
+</html>

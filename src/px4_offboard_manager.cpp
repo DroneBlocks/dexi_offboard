@@ -6,7 +6,7 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
 {
     // Declare parameters
     this->declare_parameter("keyboard_control_enabled", false);
-    
+
     // Get parameter value
     keyboard_control_enabled_ = this->get_parameter("keyboard_control_enabled").as_bool();
     RCLCPP_INFO(get_logger(), "Keyboard control enabled: %s", keyboard_control_enabled_ ? "true" : "false");
@@ -16,9 +16,14 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
                               .transient_local()
                               .keep_last(1);
 
-    // Initialize publishers, subscribers, and timer
+    // Create callback group for service to run in separate thread
+    service_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    // Initialize publishers, subscribers, services, and timer
     initializePublishers();
     initializeSubscribers();
+    initializeServices();
     initializeTimer();
 
     // Initialize mission controller
@@ -72,11 +77,21 @@ void PX4OffboardManager::initializeSubscribers()
         std::bind(&PX4OffboardManager::handleOffboardCommand, this, std::placeholders::_1));
 }
 
+void PX4OffboardManager::initializeServices()
+{
+    blockly_command_service_ = create_service<dexi_interfaces::srv::ExecuteBlocklyCommand>(
+        "execute_blockly_command",
+        std::bind(&PX4OffboardManager::executeBlocklyCommandCallback, this,
+                  std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default,
+        service_callback_group_);
+}
+
 void PX4OffboardManager::initializeTimer()
 {
     const double exec_frequency = 20.0; // Hz
     const std::chrono::nanoseconds timer_period{static_cast<int64_t>(1e9/exec_frequency)};
-    
+
     frame_timer_ = create_wall_timer(
         timer_period,
         std::bind(&PX4OffboardManager::execFrame, this));
@@ -132,6 +147,15 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
     z_ = msg->z;
     heading_ = msg->heading;
 
+    // If no active target and keyboard control is enabled, update target to hold current position
+    // This prevents drift when using keyboard control
+    if (!target_active_ && keyboard_control_enabled_ && offboard_heartbeat_thread_run_flag_) {
+        target_x_ = x_;
+        target_y_ = y_;
+        target_z_ = z_;
+        target_heading_ = heading_;
+    }
+
     // Check if target is reached after position update
     if (target_active_ && isTargetReached()) {
         RCLCPP_INFO(get_logger(), "Target reached! Position: (%.2f, %.2f, %.2f), Heading: %.2f°",
@@ -166,15 +190,11 @@ void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
     target_z_ = z;
     target_heading_ = heading;
     target_active_ = true;
-
-    RCLCPP_INFO(get_logger(), "Target set: (%.2f, %.2f, %.2f), Heading: %.2f°",
-               x, y, z, heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::clearTarget()
 {
     target_active_ = false;
-    RCLCPP_DEBUG(get_logger(), "Target cleared");
 
     // Check if we have an active mission
     if (mission_controller_->isMissionActive()) {
@@ -244,6 +264,101 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
     } else {
         RCLCPP_WARN(get_logger(), "Unknown command: %s", msg->command.c_str());
     }
+}
+
+void PX4OffboardManager::executeBlocklyCommandCallback(
+    const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
+    std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response)
+{
+    auto start_time = std::chrono::steady_clock::now();
+
+
+    // Execute the command based on the command string
+    bool command_has_target = true;  // Most commands have targets
+
+    if (request->command == "arm") {
+        arm();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "disarm") {
+        disarm();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "start_offboard_heartbeat") {
+        startOffboardHeartbeat();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "stop_offboard_heartbeat") {
+        stopOffboardHeartbeat();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "takeoff") {
+        takeoff(request->parameter);
+        command_has_target = false;  // Auto takeoff, not tracked by target_active_
+    } else if (request->command == "offboard_takeoff") {
+        offboardTakeoff(request->parameter);
+        command_has_target = true;  // Offboard takeoff uses target tracking
+    } else if (request->command == "land") {
+        land();
+        command_has_target = false;  // Auto land, not tracked
+    } else if (request->command == "fly_forward") {
+        flyForward(request->parameter);
+    } else if (request->command == "fly_backward") {
+        flyBackward(request->parameter);
+    } else if (request->command == "fly_left") {
+        flyLeft(request->parameter);
+    } else if (request->command == "fly_right") {
+        flyRight(request->parameter);
+    } else if (request->command == "fly_up") {
+        flyUp(request->parameter);
+    } else if (request->command == "fly_down") {
+        flyDown(request->parameter);
+    } else if (request->command == "yaw_left") {
+        yawLeft(request->parameter);
+    } else if (request->command == "yaw_right") {
+        yawRight(request->parameter);
+    } else {
+        RCLCPP_WARN(get_logger(), "Unknown Blockly command: %s", request->command.c_str());
+        response->success = false;
+        response->message = "Unknown command: " + request->command;
+        response->execution_time = 0.0;
+        return;
+    }
+
+    // If the command doesn't have a target (immediate commands), return immediately
+    if (!command_has_target) {
+        auto end_time = std::chrono::steady_clock::now();
+        response->success = true;
+        response->message = "Command completed";
+        response->execution_time = std::chrono::duration<float>(end_time - start_time).count();
+        return;
+    }
+
+    // Wait for target to be reached
+    const std::chrono::milliseconds poll_interval(50);
+    auto timeout_duration = std::chrono::duration<float>(request->timeout);
+    bool timeout_enabled = request->timeout > 0.0f;
+
+    while (rclcpp::ok() && target_active_) {
+        // Check for timeout
+        if (timeout_enabled) {
+            auto elapsed = std::chrono::steady_clock::now() - start_time;
+            if (elapsed >= timeout_duration) {
+                clearTarget();
+                response->success = false;
+                response->message = "Command timed out";
+                response->execution_time = std::chrono::duration<float>(elapsed).count();
+                return;
+            }
+        }
+
+        std::this_thread::sleep_for(poll_interval);
+    }
+
+    // Command completed successfully
+    auto end_time = std::chrono::steady_clock::now();
+    response->success = true;
+    response->message = "Target reached";
+    response->execution_time = std::chrono::duration<float>(end_time - start_time).count();
+
+    // Add settling delay after reaching target
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
 void PX4OffboardManager::execFrame()
@@ -544,7 +659,15 @@ void PX4OffboardManager::executeMission()
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<PX4OffboardManager>());
+
+    // Use MultiThreadedExecutor to allow service callbacks and subscribers
+    // to run concurrently - this is essential for the blocking service call
+    // to work while position updates continue to be processed
+    auto node = std::make_shared<PX4OffboardManager>();
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
+
     rclcpp::shutdown();
     return 0;
 }
