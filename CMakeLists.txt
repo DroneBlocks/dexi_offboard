@@ -22,7 +22,7 @@ find_package(OpenCV REQUIRED)
 include_directories(include)
 
 # PX4 Offboard Manager
-add_executable(px4_offboard_manager src/px4_offboard_manager.cpp src/mission_controller.cpp)
+add_executable(px4_offboard_manager src/px4_offboard_manager.cpp)
 target_include_directories(px4_offboard_manager PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)

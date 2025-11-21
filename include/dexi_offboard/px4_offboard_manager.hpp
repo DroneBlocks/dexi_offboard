@@ -10,10 +10,8 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
 #include <dexi_interfaces/srv/execute_blockly_command.hpp>
-#include "dexi_offboard/mission_controller.hpp"
 #include <thread>
 #include <atomic>
-#include <queue>
 #include <memory>
 #include <cmath>
 #include <chrono>
@@ -61,11 +59,6 @@ private:
     bool target_active_{false};
     double position_tolerance_{0.25};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
-
-    // Mission controller
-    std::unique_ptr<MissionController> mission_controller_;
-    rclcpp::TimerBase::SharedPtr mission_delay_timer_;
-    double mission_waypoint_delay_{1.0};  // seconds between waypoints
 
     // Parameters
     bool keyboard_control_enabled_{false};
@@ -116,10 +109,8 @@ private:
     void setTarget(double x, double y, double z, double heading);
     void clearTarget();
 
-    // Mission control
-    void startBoxMission(float size);
-    void stopMission();
-    void executeMission();
+    // Trajectory-based flight
+    void flyCircle(float radius);
 
     // Utility methods
     uint64_t getTimestamp();
