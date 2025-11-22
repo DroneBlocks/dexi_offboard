@@ -231,6 +231,10 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
         yawRight(distance_or_degrees);
     } else if (msg->command == "circle") {
         flyCircle(distance_or_degrees);
+    } else if (msg->command == "switch_offboard_mode") {
+        enableOffboardMode();
+    } else if (msg->command == "switch_hold_mode") {
+        enableHoldMode();
     } else {
         RCLCPP_WARN(get_logger(), "Unknown command: %s", msg->command.c_str());
     }
@@ -359,6 +363,12 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         // flyCircle is a blocking call that runs the entire trajectory
         flyCircle(request->parameter);
         command_has_target = false;  // Already completed
+    } else if (request->command == "switch_offboard_mode") {
+        enableOffboardMode();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "switch_hold_mode") {
+        enableHoldMode();
+        command_has_target = false;  // Immediate command
     } else {
         RCLCPP_WARN(get_logger(), "Unknown Blockly command: %s", request->command.c_str());
         response->success = false;
