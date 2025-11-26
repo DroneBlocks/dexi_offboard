@@ -9,12 +9,12 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
-#include "dexi_offboard/mission_controller.hpp"
+#include <dexi_interfaces/srv/execute_blockly_command.hpp>
 #include <thread>
 #include <atomic>
-#include <queue>
 #include <memory>
 #include <cmath>
+#include <chrono>
 
 class PX4OffboardManager : public rclcpp::Node
 {
@@ -37,6 +37,12 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_pos_subscriber_;
     rclcpp::Subscription<dexi_interfaces::msg::OffboardNavCommand>::SharedPtr offboard_command_subscriber_;
 
+    // ROS services
+    rclcpp::Service<dexi_interfaces::srv::ExecuteBlocklyCommand>::SharedPtr blockly_command_service_;
+
+    // Callback groups for concurrent execution
+    rclcpp::CallbackGroup::SharedPtr service_callback_group_;
+
     // Timer
     rclcpp::TimerBase::SharedPtr frame_timer_;
     rclcpp::TimerBase::SharedPtr offboard_timer_; 
@@ -51,13 +57,8 @@ private:
 
     // Target reached detection
     bool target_active_{false};
-    double position_tolerance_{0.3};  // meters
+    double position_tolerance_{0.25};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
-
-    // Mission controller
-    std::unique_ptr<MissionController> mission_controller_;
-    rclcpp::TimerBase::SharedPtr mission_delay_timer_;
-    double mission_waypoint_delay_{1.0};  // seconds between waypoints
 
     // Parameters
     bool keyboard_control_enabled_{false};
@@ -70,6 +71,7 @@ private:
     // Methods
     void initializePublishers();
     void initializeSubscribers();
+    void initializeServices();
     void initializeTimer();
 
     // Callbacks
@@ -77,6 +79,9 @@ private:
     void vehicleGlobalPosCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
     void vehicleLocalPosCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
     void handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg);
+    void executeBlocklyCommandCallback(
+        const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
+        std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response);
     void execFrame();
 
     // Command methods
@@ -104,10 +109,8 @@ private:
     void setTarget(double x, double y, double z, double heading);
     void clearTarget();
 
-    // Mission control
-    void startBoxMission(float size);
-    void stopMission();
-    void executeMission();
+    // Trajectory-based flight
+    void flyCircle(float radius);
 
     // Utility methods
     uint64_t getTimestamp();

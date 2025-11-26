@@ -6,7 +6,7 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
 {
     // Declare parameters
     this->declare_parameter("keyboard_control_enabled", false);
-    
+
     // Get parameter value
     keyboard_control_enabled_ = this->get_parameter("keyboard_control_enabled").as_bool();
     RCLCPP_INFO(get_logger(), "Keyboard control enabled: %s", keyboard_control_enabled_ ? "true" : "false");
@@ -16,13 +16,15 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
                               .transient_local()
                               .keep_last(1);
 
-    // Initialize publishers, subscribers, and timer
+    // Create callback group for service to run in separate thread
+    service_callback_group_ = this->create_callback_group(
+        rclcpp::CallbackGroupType::MutuallyExclusive);
+
+    // Initialize publishers, subscribers, services, and timer
     initializePublishers();
     initializeSubscribers();
+    initializeServices();
     initializeTimer();
-
-    // Initialize mission controller
-    mission_controller_ = std::make_unique<MissionController>();
 
     // Initialize offboard heartbeat message
     offboard_heartbeat_.position = true;
@@ -72,11 +74,21 @@ void PX4OffboardManager::initializeSubscribers()
         std::bind(&PX4OffboardManager::handleOffboardCommand, this, std::placeholders::_1));
 }
 
+void PX4OffboardManager::initializeServices()
+{
+    blockly_command_service_ = create_service<dexi_interfaces::srv::ExecuteBlocklyCommand>(
+        "execute_blockly_command",
+        std::bind(&PX4OffboardManager::executeBlocklyCommandCallback, this,
+                  std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default,
+        service_callback_group_);
+}
+
 void PX4OffboardManager::initializeTimer()
 {
     const double exec_frequency = 20.0; // Hz
     const std::chrono::nanoseconds timer_period{static_cast<int64_t>(1e9/exec_frequency)};
-    
+
     frame_timer_ = create_wall_timer(
         timer_period,
         std::bind(&PX4OffboardManager::execFrame, this));
@@ -132,6 +144,15 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
     z_ = msg->z;
     heading_ = msg->heading;
 
+    // If no active target and keyboard control is enabled, update target to hold current position
+    // This prevents drift when using keyboard control
+    if (!target_active_ && keyboard_control_enabled_ && offboard_heartbeat_thread_run_flag_) {
+        target_x_ = x_;
+        target_y_ = y_;
+        target_z_ = z_;
+        target_heading_ = heading_;
+    }
+
     // Check if target is reached after position update
     if (target_active_ && isTargetReached()) {
         RCLCPP_INFO(get_logger(), "Target reached! Position: (%.2f, %.2f, %.2f), Heading: %.2f°",
@@ -166,37 +187,11 @@ void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
     target_z_ = z;
     target_heading_ = heading;
     target_active_ = true;
-
-    RCLCPP_INFO(get_logger(), "Target set: (%.2f, %.2f, %.2f), Heading: %.2f°",
-               x, y, z, heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::clearTarget()
 {
     target_active_ = false;
-    RCLCPP_DEBUG(get_logger(), "Target cleared");
-
-    // Check if we have an active mission
-    if (mission_controller_->isMissionActive()) {
-        mission_controller_->waypointReached();
-
-        // Add delay before next waypoint for drone settling
-        if (mission_controller_->hasNextWaypoint()) {
-            RCLCPP_INFO(get_logger(), "Waypoint reached! Settling for %.1f seconds before next waypoint...",
-                       mission_waypoint_delay_);
-
-            mission_delay_timer_ = create_wall_timer(
-                std::chrono::milliseconds(static_cast<int>(mission_waypoint_delay_ * 1000)),
-                [this]() {
-                    executeMission();  // Continue to next waypoint after delay
-                    mission_delay_timer_->cancel();  // Stop the timer
-                }
-            );
-        } else {
-            // No more waypoints, mission complete
-            RCLCPP_INFO(get_logger(), "Mission completed!");
-        }
-    }
 }
 
 void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg)
@@ -234,16 +229,192 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
         yawLeft(distance_or_degrees);
     } else if (msg->command == "yaw_right") {
         yawRight(distance_or_degrees);
-    } else if (msg->command == "box_mission") {
-        startBoxMission(distance_or_degrees);
-    } else if (msg->command == "stop_mission") {
-        stopMission();
-    } else if (msg->command == "set_mission_delay") {
-        mission_waypoint_delay_ = distance_or_degrees;
-        RCLCPP_INFO(get_logger(), "Mission waypoint delay set to %.1f seconds", mission_waypoint_delay_);
+    } else if (msg->command == "circle") {
+        flyCircle(distance_or_degrees);
+    } else if (msg->command == "switch_offboard_mode") {
+        enableOffboardMode();
+    } else if (msg->command == "switch_hold_mode") {
+        enableHoldMode();
     } else {
         RCLCPP_WARN(get_logger(), "Unknown command: %s", msg->command.c_str());
     }
+}
+
+void PX4OffboardManager::executeBlocklyCommandCallback(
+    const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
+    std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response)
+{
+    auto start_time = std::chrono::steady_clock::now();
+
+
+    // Execute the command based on the command string
+    bool command_has_target = true;  // Most commands have targets
+
+    if (request->command == "arm") {
+        arm();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "disarm") {
+        disarm();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "start_offboard_heartbeat") {
+        startOffboardHeartbeat();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "stop_offboard_heartbeat") {
+        stopOffboardHeartbeat();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "takeoff") {
+        float target_altitude = request->parameter;
+        takeoff(target_altitude);
+
+        // Wait for takeoff to reach target altitude
+        const std::chrono::milliseconds poll_interval(100);
+        auto timeout_duration = std::chrono::duration<float>(request->timeout);
+        bool timeout_enabled = request->timeout > 0.0f;
+
+        // Initial altitude (negative Z is up in NED)
+        double initial_z = z_;
+        double target_z = initial_z - target_altitude;
+
+        RCLCPP_INFO(get_logger(), "Waiting for takeoff: current_z=%.2f, target_z=%.2f", z_, target_z);
+
+        while (rclcpp::ok()) {
+            // Check if we've reached target altitude (within tolerance)
+            double altitude_error = std::abs(z_ - target_z);
+            if (altitude_error < position_tolerance_) {
+                RCLCPP_INFO(get_logger(), "Takeoff altitude reached: z=%.2f", z_);
+                break;
+            }
+
+            // Check for timeout
+            if (timeout_enabled) {
+                auto elapsed = std::chrono::steady_clock::now() - start_time;
+                if (elapsed >= timeout_duration) {
+                    response->success = false;
+                    response->message = "Takeoff timed out - altitude not reached";
+                    response->execution_time = std::chrono::duration<float>(elapsed).count();
+                    return;
+                }
+            }
+
+            std::this_thread::sleep_for(poll_interval);
+        }
+
+        command_has_target = false;  // Already handled waiting above
+    } else if (request->command == "offboard_takeoff") {
+        offboardTakeoff(request->parameter);
+        command_has_target = true;  // Offboard takeoff uses target tracking
+    } else if (request->command == "land") {
+        land();
+
+        // Wait for landing to complete (check if we're on the ground)
+        const std::chrono::milliseconds poll_interval(100);
+        auto timeout_duration = std::chrono::duration<float>(request->timeout);
+        bool timeout_enabled = request->timeout > 0.0f;
+
+        RCLCPP_INFO(get_logger(), "Waiting for landing to complete...");
+
+        while (rclcpp::ok()) {
+            // Check if we're on the ground (z close to 0 in NED frame)
+            // Allow some tolerance since the ground might not be exactly at z=0
+            if (std::abs(z_) < 0.5) {  // Within 0.5m of ground level
+                RCLCPP_INFO(get_logger(), "Landing complete: z=%.2f", z_);
+
+                // Transition to HOLD mode to exit LAND mode
+                // This prevents issues with repeated missions where vehicle stays in LAND mode
+                enableHoldMode();
+                RCLCPP_INFO(get_logger(), "Switched to HOLD mode after landing");
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                break;
+            }
+
+            // Check for timeout
+            if (timeout_enabled) {
+                auto elapsed = std::chrono::steady_clock::now() - start_time;
+                if (elapsed >= timeout_duration) {
+                    response->success = false;
+                    response->message = "Landing timed out";
+                    response->execution_time = std::chrono::duration<float>(elapsed).count();
+                    return;
+                }
+            }
+
+            std::this_thread::sleep_for(poll_interval);
+        }
+
+        command_has_target = false;  // Already handled waiting above
+    } else if (request->command == "fly_forward") {
+        flyForward(request->parameter);
+    } else if (request->command == "fly_backward") {
+        flyBackward(request->parameter);
+    } else if (request->command == "fly_left") {
+        flyLeft(request->parameter);
+    } else if (request->command == "fly_right") {
+        flyRight(request->parameter);
+    } else if (request->command == "fly_up") {
+        flyUp(request->parameter);
+    } else if (request->command == "fly_down") {
+        flyDown(request->parameter);
+    } else if (request->command == "yaw_left") {
+        yawLeft(request->parameter);
+    } else if (request->command == "yaw_right") {
+        yawRight(request->parameter);
+    } else if (request->command == "circle") {
+        // flyCircle is a blocking call that runs the entire trajectory
+        flyCircle(request->parameter);
+        command_has_target = false;  // Already completed
+    } else if (request->command == "switch_offboard_mode") {
+        enableOffboardMode();
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "switch_hold_mode") {
+        enableHoldMode();
+        command_has_target = false;  // Immediate command
+    } else {
+        RCLCPP_WARN(get_logger(), "Unknown Blockly command: %s", request->command.c_str());
+        response->success = false;
+        response->message = "Unknown command: " + request->command;
+        response->execution_time = 0.0;
+        return;
+    }
+
+    // If the command doesn't have a target (immediate commands), return immediately
+    if (!command_has_target) {
+        auto end_time = std::chrono::steady_clock::now();
+        response->success = true;
+        response->message = "Command completed";
+        response->execution_time = std::chrono::duration<float>(end_time - start_time).count();
+        return;
+    }
+
+    // Wait for target to be reached
+    const std::chrono::milliseconds poll_interval(50);
+    auto timeout_duration = std::chrono::duration<float>(request->timeout);
+    bool timeout_enabled = request->timeout > 0.0f;
+
+    while (rclcpp::ok() && target_active_) {
+        // Check for timeout
+        if (timeout_enabled) {
+            auto elapsed = std::chrono::steady_clock::now() - start_time;
+            if (elapsed >= timeout_duration) {
+                clearTarget();
+                response->success = false;
+                response->message = "Command timed out";
+                response->execution_time = std::chrono::duration<float>(elapsed).count();
+                return;
+            }
+        }
+
+        std::this_thread::sleep_for(poll_interval);
+    }
+
+    // Command completed successfully
+    auto end_time = std::chrono::steady_clock::now();
+    response->success = true;
+    response->message = "Target reached";
+    response->execution_time = std::chrono::duration<float>(end_time - start_time).count();
+
+    // Add settling delay after reaching target
+    std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
 void PX4OffboardManager::execFrame()
@@ -338,11 +509,6 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
 
 void PX4OffboardManager::land()
 {
-    // Stop any active mission first
-    if (mission_controller_->isMissionActive()) {
-        stopMission();
-    }
-
     // Stop offboard heartbeat since we're switching to auto land mode
     stopOffboardHeartbeat();
 
@@ -499,52 +665,134 @@ void PX4OffboardManager::yawRight(float angle)
     RCLCPP_INFO(get_logger(), "Yawing RIGHT: %.2f degrees", angle);
 }
 
-// Mission control methods
-void PX4OffboardManager::startBoxMission(float size)
+// Trajectory-based flight methods
+void PX4OffboardManager::flyCircle(float radius)
 {
-    mission_controller_->createBoxMission(size, x_, y_, z_);
+    RCLCPP_INFO(get_logger(), "Starting smooth circle flight: radius %.2fm at altitude %.2fm",
+               radius, -z_);
 
-    auto target_callback = [this]() {
-        RCLCPP_INFO(get_logger(), "Waypoint reached! Continuing mission...");
-    };
+    // Remember if heartbeat was running so we can restore it later
+    bool heartbeat_was_running = offboard_heartbeat_thread_run_flag_;
 
-    auto complete_callback = [this]() {
-        RCLCPP_INFO(get_logger(), "Mission completed!");
-    };
-
-    mission_controller_->startMission(target_callback, complete_callback);
-
-    RCLCPP_INFO(get_logger(), "Starting box mission: %.2fm x %.2fm at current altitude %.2fm",
-               size, size, -z_);  // Display positive altitude (negative Z in NED)
-
-    executeMission();
-}
-
-void PX4OffboardManager::stopMission()
-{
-    mission_controller_->stopMission();
-    clearTarget();
-    RCLCPP_INFO(get_logger(), "Mission stopped");
-}
-
-void PX4OffboardManager::executeMission()
-{
-    if (!mission_controller_->isMissionActive() || !mission_controller_->hasNextWaypoint()) {
-        return;
+    // Stop the background heartbeat - we'll take over sending setpoints at 20Hz
+    if (heartbeat_was_running) {
+        RCLCPP_INFO(get_logger(), "Pausing offboard heartbeat for trajectory control");
+        stopOffboardHeartbeat();
     }
 
-    Waypoint next = mission_controller_->getNextWaypoint();
-    setTarget(next.x, next.y, next.z, next.heading);
+    // Store starting position and heading
+    const double center_x = x_;
+    const double center_y = y_;
+    const double center_z = z_;
+    const double start_heading = heading_;
 
-    RCLCPP_INFO(get_logger(), "Executing waypoint: %s -> (%.2f, %.2f, %.2f)",
-               next.description.c_str(), next.x, next.y, next.z);
+    // Circle parameters - scale duration with radius to maintain reasonable speed
+    // Target speed: ~1.0 m/s for smooth flight
+    const double circumference = 2.0 * M_PI * radius;
+    const double target_speed = 1.0;  // m/s - conservative for good tracking
+    const double duration = circumference / target_speed;  // Scale time with radius
+    const double angular_velocity = 2.0 * M_PI / duration;  // radians per second
+    const int rate_hz = 20;  // 20Hz control rate
+    const std::chrono::milliseconds dt(1000 / rate_hz);
+
+    // Calculate total number of steps
+    const int total_steps = static_cast<int>(duration * rate_hz);
+
+    RCLCPP_INFO(get_logger(),
+               "Circle: radius=%.1fm, circumference=%.1fm, duration=%.1fs, speed=%.2fm/s, setpoints=%d",
+               radius, circumference, duration, target_speed, total_steps);
+
+    // Fly the circle
+    for (int step = 0; step <= total_steps && rclcpp::ok(); ++step) {
+        double t = step * (1.0 / rate_hz);  // Current time in seconds
+        double angle = angular_velocity * t;  // Current angle around circle
+
+        // Calculate position in body frame (relative to starting heading)
+        // Circle starts going forward (positive X in body frame)
+        double x_body = radius * std::sin(angle);
+        double y_body = radius * (1.0 - std::cos(angle));
+
+        // Rotate by starting heading to get NED frame coordinates
+        double cos_heading = std::cos(start_heading);
+        double sin_heading = std::sin(start_heading);
+
+        double x_ned = center_x + (x_body * cos_heading - y_body * sin_heading);
+        double y_ned = center_y + (x_body * sin_heading + y_body * cos_heading);
+
+        // Calculate heading tangent to circle (facing forward along path)
+        double target_heading = start_heading + angle;
+
+        // Send offboard control mode to keep offboard mode active
+        offboard_heartbeat_.timestamp = getTimestamp();
+        offboard_mode_publisher_->publish(offboard_heartbeat_);
+
+        // Send trajectory setpoint for this point on the circle
+        sendTrajectorySetpointPosition(
+            static_cast<float>(x_ned),
+            static_cast<float>(y_ned),
+            static_cast<float>(center_z),
+            static_cast<float>(target_heading)
+        );
+
+        // Log progress and tracking error every 2 seconds
+        if (step % (rate_hz * 2) == 0) {
+            double progress = (angle / (2.0 * M_PI)) * 100.0;
+
+            // Calculate tracking error (how far drone is from commanded position)
+            double pos_error_x = x_ - x_ned;
+            double pos_error_y = y_ - y_ned;
+            double pos_error_z = z_ - center_z;
+            double tracking_error = std::sqrt(pos_error_x*pos_error_x +
+                                             pos_error_y*pos_error_y +
+                                             pos_error_z*pos_error_z);
+
+            RCLCPP_INFO(get_logger(),
+                       "Circle: %.0f%% complete (%.1f°) | Tracking error: %.2fm | Cmd:[%.1f,%.1f,%.1f] Act:[%.1f,%.1f,%.1f]",
+                       progress, angle * 180.0 / M_PI, tracking_error,
+                       x_ned, y_ned, center_z, x_, y_, z_);
+        }
+
+        std::this_thread::sleep_for(dt);
+    }
+
+    // Hold final position for 1 second to ensure we complete the circle
+    for (int i = 0; i < rate_hz && rclcpp::ok(); ++i) {
+        // Send offboard control mode
+        offboard_heartbeat_.timestamp = getTimestamp();
+        offboard_mode_publisher_->publish(offboard_heartbeat_);
+
+        // Send trajectory setpoint to hold position
+        sendTrajectorySetpointPosition(
+            static_cast<float>(center_x),
+            static_cast<float>(center_y),
+            static_cast<float>(center_z),
+            static_cast<float>(start_heading)
+        );
+        std::this_thread::sleep_for(dt);
+    }
+
+    RCLCPP_INFO(get_logger(), "Circle flight completed!");
+
+    // Restart the heartbeat if it was running before
+    if (heartbeat_was_running) {
+        RCLCPP_INFO(get_logger(), "Resuming offboard heartbeat");
+        startOffboardHeartbeat();
+    }
 }
 
 // Main function
 int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<PX4OffboardManager>());
+
+    // Use MultiThreadedExecutor to allow service callbacks and subscribers
+    // to run concurrently - this is essential for the blocking service call
+    // to work while position updates continue to be processed
+    auto node = std::make_shared<PX4OffboardManager>();
+    rclcpp::executors::MultiThreadedExecutor executor;
+    executor.add_node(node);
+    executor.spin();
+
     rclcpp::shutdown();
     return 0;
 }
