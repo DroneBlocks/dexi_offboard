@@ -55,6 +55,9 @@ private:
     // Target setpoints for offboard control
     double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
 
+    // Temporary storage for goto_ned parameters (used by service)
+    double pending_north_{0.0}, pending_east_{0.0}, pending_down_{0.0}, pending_yaw_{0.0};
+
     // Target reached detection
     bool target_active_{false};
     double position_tolerance_{0.25};  // meters
@@ -103,6 +106,8 @@ private:
     void flyDown(float distance);
     void yawLeft(float angle);
     void yawRight(float angle);
+    void gotoNED(float north, float east, float down, float yaw);
+    void setGotoNEDParams(float north, float east, float down, float yaw);
 
     // Target reached detection
     bool isTargetReached();

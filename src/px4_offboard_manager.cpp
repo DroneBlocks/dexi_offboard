@@ -229,6 +229,12 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
         yawLeft(distance_or_degrees);
     } else if (msg->command == "yaw_right") {
         yawRight(distance_or_degrees);
+    } else if (msg->command == "set_goto_ned_params") {
+        setGotoNEDParams(msg->north, msg->east, msg->down, msg->yaw);
+        RCLCPP_INFO(get_logger(), "Set goto_ned params: N=%.2f, E=%.2f, D=%.2f, Yaw=%.2f°",
+                    msg->north, msg->east, msg->down, msg->yaw);
+    } else if (msg->command == "goto_ned") {
+        gotoNED(msg->north, msg->east, msg->down, msg->yaw);
     } else if (msg->command == "circle") {
         flyCircle(distance_or_degrees);
     } else if (msg->command == "switch_offboard_mode") {
@@ -359,6 +365,9 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         yawLeft(request->parameter);
     } else if (request->command == "yaw_right") {
         yawRight(request->parameter);
+    } else if (request->command == "goto_ned") {
+        // Use pending values that should have been set via setGotoNEDParams
+        gotoNED(pending_north_, pending_east_, pending_down_, pending_yaw_);
     } else if (request->command == "circle") {
         // flyCircle is a blocking call that runs the entire trajectory
         flyCircle(request->parameter);
@@ -663,6 +672,22 @@ void PX4OffboardManager::yawRight(float angle)
     double new_heading = heading_ + angle * M_PI / 180.0f;
     setTarget(x_, y_, z_, new_heading);
     RCLCPP_INFO(get_logger(), "Yawing RIGHT: %.2f degrees", angle);
+}
+
+void PX4OffboardManager::gotoNED(float north, float east, float down, float yaw)
+{
+    double yaw_rad = yaw * M_PI / 180.0f;
+    setTarget(north, east, down, yaw_rad);
+    RCLCPP_INFO(get_logger(), "Going to NED position: N=%.2f, E=%.2f, D=%.2f, Yaw=%.2f°",
+                north, east, down, yaw);
+}
+
+void PX4OffboardManager::setGotoNEDParams(float north, float east, float down, float yaw)
+{
+    pending_north_ = north;
+    pending_east_ = east;
+    pending_down_ = down;
+    pending_yaw_ = yaw;
 }
 
 // Trajectory-based flight methods
