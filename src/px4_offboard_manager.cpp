@@ -144,14 +144,9 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
     z_ = msg->z;
     heading_ = msg->heading;
 
-    // If no active target and keyboard control is enabled, update target to hold current position
-    // This prevents drift when using keyboard control
-    if (!target_active_ && keyboard_control_enabled_ && offboard_heartbeat_thread_run_flag_) {
-        target_x_ = x_;
-        target_y_ = y_;
-        target_z_ = z_;
-        target_heading_ = heading_;
-    }
+    // Position hold is now set once in clearTarget() rather than continuously here.
+    // Continuously updating target to current position caused altitude drift on real hardware
+    // as sensor noise/drift would be amplified into sustained movement.
 
     // Check if target is reached after position update
     if (target_active_ && isTargetReached()) {
@@ -191,6 +186,12 @@ void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
 
 void PX4OffboardManager::clearTarget()
 {
+    // Set hold position ONCE at current location to prevent drift
+    // This fixes altitude drift caused by continuously updating target to current position
+    target_x_ = x_;
+    target_y_ = y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
     target_active_ = false;
 }
 
