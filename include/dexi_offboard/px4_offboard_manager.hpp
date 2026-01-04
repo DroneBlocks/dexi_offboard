@@ -10,6 +10,7 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
 #include <dexi_interfaces/srv/execute_blockly_command.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <thread>
 #include <atomic>
 #include <memory>
@@ -36,6 +37,7 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr vehicle_global_pos_subscriber_;
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_pos_subscriber_;
     rclcpp::Subscription<dexi_interfaces::msg::OffboardNavCommand>::SharedPtr offboard_command_subscriber_;
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pause_setpoints_subscriber_;
 
     // ROS services
     rclcpp::Service<dexi_interfaces::srv::ExecuteBlocklyCommand>::SharedPtr blockly_command_service_;
@@ -68,6 +70,7 @@ private:
 
     // Offboard control
     std::atomic<bool> offboard_heartbeat_thread_run_flag_{false};
+    std::atomic<bool> setpoints_paused_{false};  // When true, stop publishing TrajectorySetpoint
     std::unique_ptr<std::thread> offboard_heartbeat_thread_;
     px4_msgs::msg::OffboardControlMode offboard_heartbeat_;
 
@@ -82,6 +85,7 @@ private:
     void vehicleGlobalPosCallback(const px4_msgs::msg::VehicleGlobalPosition::SharedPtr msg);
     void vehicleLocalPosCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
     void handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg);
+    void handlePauseSetpoints(const std_msgs::msg::Bool::SharedPtr msg);
     void executeBlocklyCommandCallback(
         const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
         std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response);

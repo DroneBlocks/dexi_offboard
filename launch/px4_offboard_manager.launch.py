@@ -10,7 +10,7 @@ def generate_launch_description():
             name='px4_offboard_manager',
             output='screen',
             parameters=[{
-                'keyboard_control_enabled': True
+                'keyboard_control_enabled': False  # Set True for keyboard control, False for position hold
             }],
             emulate_tty=True,
         )

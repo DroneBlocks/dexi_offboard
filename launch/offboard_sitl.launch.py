@@ -19,7 +19,7 @@ def generate_launch_description():
             namespace='dexi',
             output='screen',
             parameters=[{
-                'keyboard_control_enabled': True
+                'keyboard_control_enabled': False  # Set True for keyboard control, False for position hold
             }],
         )
     ]) 

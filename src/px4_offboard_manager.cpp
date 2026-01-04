@@ -72,6 +72,12 @@ void PX4OffboardManager::initializeSubscribers()
         "offboard_manager",
         qos_profile_,
         std::bind(&PX4OffboardManager::handleOffboardCommand, this, std::placeholders::_1));
+
+    // Pause setpoints subscriber - allows other nodes (e.g., precision_landing) to take over control
+    pause_setpoints_subscriber_ = create_subscription<std_msgs::msg::Bool>(
+        "/dexi/pause_setpoints",
+        10,
+        std::bind(&PX4OffboardManager::handlePauseSetpoints, this, std::placeholders::_1));
 }
 
 void PX4OffboardManager::initializeServices()
@@ -244,6 +250,16 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
         enableHoldMode();
     } else {
         RCLCPP_WARN(get_logger(), "Unknown command: %s", msg->command.c_str());
+    }
+}
+
+void PX4OffboardManager::handlePauseSetpoints(const std_msgs::msg::Bool::SharedPtr msg)
+{
+    setpoints_paused_ = msg->data;
+    if (msg->data) {
+        RCLCPP_INFO(get_logger(), "Setpoints PAUSED - external node has taken control");
+    } else {
+        RCLCPP_INFO(get_logger(), "Setpoints RESUMED - offboard manager has control");
     }
 }
 
@@ -603,12 +619,14 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 {
     const std::chrono::milliseconds sleep_duration(50);  // 20Hz
     while (offboard_heartbeat_thread_run_flag_) {
-        // Send offboard control mode
+        // Always send offboard control mode (keeps offboard mode active)
         offboard_heartbeat_.timestamp = getTimestamp();
         offboard_mode_publisher_->publish(offboard_heartbeat_);
 
-        // Send target setpoints to PX4 (use current position if no target set)
-        sendTrajectorySetpointPosition(target_x_, target_y_, target_z_, target_heading_);
+        // Only send setpoints if not paused (allows external nodes to control)
+        if (!setpoints_paused_) {
+            sendTrajectorySetpointPosition(target_x_, target_y_, target_z_, target_heading_);
+        }
 
         std::this_thread::sleep_for(sleep_duration);
     }
