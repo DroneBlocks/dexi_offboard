@@ -150,17 +150,20 @@ void PX4OffboardManager::vehicleGlobalPosCallback(const px4_msgs::msg::VehicleGl
 
 void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg)
 {
-    x_ = msg->x;
-    y_ = msg->y;
-    z_ = msg->z;
-    heading_ = msg->heading;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        x_ = msg->x;
+        y_ = msg->y;
+        z_ = msg->z;
+        heading_ = msg->heading;
+    }
 
     // Position hold is now set once in clearTarget() rather than continuously here.
     // Continuously updating target to current position caused altitude drift on real hardware
     // as sensor noise/drift would be amplified into sustained movement.
 
     // Check if target is reached after position update
-    if (target_active_ && isTargetReached()) {
+    if (target_active_.load() && isTargetReached()) {
         RCLCPP_INFO(get_logger(), "Target reached! Position: (%.2f, %.2f, %.2f), Heading: %.2f°",
                    x_, y_, z_, heading_ * 180.0 / M_PI);
         clearTarget();
@@ -169,7 +172,9 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
 
 bool PX4OffboardManager::isTargetReached()
 {
-    if (!target_active_) return false;
+    if (!target_active_.load()) return false;
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
 
     // Calculate position distance
     double dx = x_ - target_x_;
@@ -188,22 +193,26 @@ bool PX4OffboardManager::isTargetReached()
 
 void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
 {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     target_x_ = x;
     target_y_ = y;
     target_z_ = z;
     target_heading_ = heading;
-    target_active_ = true;
+    target_active_.store(true);
 }
 
 void PX4OffboardManager::clearTarget()
 {
     // Set hold position ONCE at current location to prevent drift
     // This fixes altitude drift caused by continuously updating target to current position
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    RCLCPP_INFO(get_logger(), "Clearing target - holding at heading: %.2f° (was targeting: %.2f°)",
+                heading_ * 180.0 / M_PI, target_heading_ * 180.0 / M_PI);
     target_x_ = x_;
     target_y_ = y_;
     target_z_ = z_;
     target_heading_ = heading_;
-    target_active_ = false;
+    target_active_.store(false);
 }
 
 void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg)
@@ -435,7 +444,7 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
     auto timeout_duration = std::chrono::duration<float>(request->timeout);
     bool timeout_enabled = request->timeout > 0.0f;
 
-    while (rclcpp::ok() && target_active_) {
+    while (rclcpp::ok() && target_active_.load()) {
         // Check for timeout
         if (timeout_enabled) {
             auto elapsed = std::chrono::steady_clock::now() - start_time;
@@ -684,7 +693,16 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 
         // Only send setpoints if not paused (allows external nodes to control)
         if (!setpoints_paused_) {
-            sendTrajectorySetpointPosition(target_x_, target_y_, target_z_, target_heading_);
+            // Copy target values under lock to avoid race conditions
+            double tx, ty, tz, th;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                tx = target_x_;
+                ty = target_y_;
+                tz = target_z_;
+                th = target_heading_;
+            }
+            sendTrajectorySetpointPosition(tx, ty, tz, th);
         }
 
         std::this_thread::sleep_for(sleep_duration);
@@ -694,62 +712,174 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 // Movement methods
 void PX4OffboardManager::flyForward(float distance)
 {
-    double new_x = distance * std::cos(heading_) + x_;
-    double new_y = distance * std::sin(heading_) + y_;
-    setTarget(new_x, new_y, z_, heading_);
-    RCLCPP_INFO(get_logger(), "Flying FORWARD: %.2f meters", distance);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_x = distance * std::cos(current_heading) + current_x;
+    double new_y = distance * std::sin(current_heading) + current_y;
+    setTarget(new_x, new_y, current_z, current_heading);
+    RCLCPP_INFO(get_logger(), "Flying FORWARD: %.2f meters at heading %.2f°", distance, current_heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::flyBackward(float distance)
 {
-    double new_x = distance * std::cos(heading_ + M_PI) + x_;
-    double new_y = distance * std::sin(heading_ + M_PI) + y_;
-    setTarget(new_x, new_y, z_, heading_);
-    RCLCPP_INFO(get_logger(), "Flying BACKWARD: %.2f meters", distance);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_x = distance * std::cos(current_heading + M_PI) + current_x;
+    double new_y = distance * std::sin(current_heading + M_PI) + current_y;
+    setTarget(new_x, new_y, current_z, current_heading);
+    RCLCPP_INFO(get_logger(), "Flying BACKWARD: %.2f meters at heading %.2f°", distance, current_heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::flyRight(float distance)
 {
-    double new_x = distance * std::cos(heading_ + M_PI_2) + x_;
-    double new_y = distance * std::sin(heading_ + M_PI_2) + y_;
-    setTarget(new_x, new_y, z_, heading_);
-    RCLCPP_INFO(get_logger(), "Flying RIGHT: %.2f meters", distance);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_x = distance * std::cos(current_heading + M_PI_2) + current_x;
+    double new_y = distance * std::sin(current_heading + M_PI_2) + current_y;
+    setTarget(new_x, new_y, current_z, current_heading);
+    RCLCPP_INFO(get_logger(), "Flying RIGHT: %.2f meters at heading %.2f°", distance, current_heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::flyLeft(float distance)
 {
-    double new_x = distance * std::cos(heading_ - M_PI_2) + x_;
-    double new_y = distance * std::sin(heading_ - M_PI_2) + y_;
-    setTarget(new_x, new_y, z_, heading_);
-    RCLCPP_INFO(get_logger(), "Flying LEFT: %.2f meters", distance);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_x = distance * std::cos(current_heading - M_PI_2) + current_x;
+    double new_y = distance * std::sin(current_heading - M_PI_2) + current_y;
+    setTarget(new_x, new_y, current_z, current_heading);
+    RCLCPP_INFO(get_logger(), "Flying LEFT: %.2f meters at heading %.2f°", distance, current_heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::flyUp(float distance)
 {
-    double new_z = z_ - distance;  // Negative Z is up in NED
-    setTarget(x_, y_, new_z, heading_);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_z = current_z - distance;  // Negative Z is up in NED
+    setTarget(current_x, current_y, new_z, current_heading);
     RCLCPP_INFO(get_logger(), "Flying UP: %.2f meters", distance);
 }
 
 void PX4OffboardManager::flyDown(float distance)
 {
-    double new_z = z_ + distance;  // Positive Z is down in NED
-    setTarget(x_, y_, new_z, heading_);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_z = current_z + distance;  // Positive Z is down in NED
+    setTarget(current_x, current_y, new_z, current_heading);
     RCLCPP_INFO(get_logger(), "Flying DOWN: %.2f meters", distance);
 }
 
 void PX4OffboardManager::yawLeft(float angle)
 {
-    double new_heading = heading_ - angle * M_PI / 180.0f;
-    setTarget(x_, y_, z_, new_heading);
-    RCLCPP_INFO(get_logger(), "Yawing LEFT: %.2f degrees", angle);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_heading = current_heading - angle * M_PI / 180.0f;
+    // Normalize heading to [-PI, PI]
+    while (new_heading > M_PI) new_heading -= 2.0 * M_PI;
+    while (new_heading < -M_PI) new_heading += 2.0 * M_PI;
+    setTarget(current_x, current_y, current_z, new_heading);
+    RCLCPP_INFO(get_logger(), "Yawing LEFT: %.2f degrees (current: %.2f°, target: %.2f°)",
+                angle, current_heading * 180.0 / M_PI, new_heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::yawRight(float angle)
 {
-    double new_heading = heading_ + angle * M_PI / 180.0f;
-    setTarget(x_, y_, z_, new_heading);
-    RCLCPP_INFO(get_logger(), "Yawing RIGHT: %.2f degrees", angle);
+    // Ensure offboard mode is active (needed after native takeoff)
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    double current_heading, current_x, current_y, current_z;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+        current_x = x_;
+        current_y = y_;
+        current_z = z_;
+    }
+    double new_heading = current_heading + angle * M_PI / 180.0f;
+    // Normalize heading to [-PI, PI]
+    while (new_heading > M_PI) new_heading -= 2.0 * M_PI;
+    while (new_heading < -M_PI) new_heading += 2.0 * M_PI;
+    setTarget(current_x, current_y, current_z, new_heading);
+    RCLCPP_INFO(get_logger(), "Yawing RIGHT: %.2f degrees (current: %.2f°, target: %.2f°)",
+                angle, current_heading * 180.0 / M_PI, new_heading * 180.0 / M_PI);
 }
 
 void PX4OffboardManager::gotoNED(float north, float east, float down, float yaw)

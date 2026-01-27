@@ -14,6 +14,7 @@
 #include <std_msgs/msg/bool.hpp>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <memory>
 #include <cmath>
 #include <chrono>
@@ -63,7 +64,10 @@ private:
     double pending_north_{0.0}, pending_east_{0.0}, pending_down_{0.0}, pending_yaw_{0.0};
 
     // Target reached detection
-    bool target_active_{false};
+    std::atomic<bool> target_active_{false};
+
+    // Mutex for thread-safe access to position/heading state
+    mutable std::mutex state_mutex_;
     double position_tolerance_{0.25};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
 
