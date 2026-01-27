@@ -5,9 +5,8 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
   qos_profile_(1)
 {
     // Declare parameters
+    // Note: keyboard_control_enabled is read by the GUI to show/hide keyboard control option
     this->declare_parameter("keyboard_control_enabled", false);
-
-    // Get parameter value
     keyboard_control_enabled_ = this->get_parameter("keyboard_control_enabled").as_bool();
     RCLCPP_INFO(get_logger(), "Keyboard control enabled: %s", keyboard_control_enabled_ ? "true" : "false");
 
@@ -78,6 +77,12 @@ void PX4OffboardManager::initializeSubscribers()
         "/dexi/pause_setpoints",
         10,
         std::bind(&PX4OffboardManager::handlePauseSetpoints, this, std::placeholders::_1));
+
+    // Vehicle land detected subscriber - for proper landing confirmation
+    vehicle_land_detected_subscriber_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
+        "/fmu/out/vehicle_land_detected",
+        qos_profile_,
+        std::bind(&PX4OffboardManager::vehicleLandDetectedCallback, this, std::placeholders::_1));
 }
 
 void PX4OffboardManager::initializeServices()
@@ -263,6 +268,11 @@ void PX4OffboardManager::handlePauseSetpoints(const std_msgs::msg::Bool::SharedP
     }
 }
 
+void PX4OffboardManager::vehicleLandDetectedCallback(const px4_msgs::msg::VehicleLandDetected::SharedPtr msg)
+{
+    landed_ = msg->landed;
+}
+
 void PX4OffboardManager::executeBlocklyCommandCallback(
     const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
     std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response)
@@ -329,7 +339,7 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
     } else if (request->command == "land") {
         land();
 
-        // Wait for landing to complete (check if we're on the ground)
+        // Wait for landing to complete
         const std::chrono::milliseconds poll_interval(100);
         auto timeout_duration = std::chrono::duration<float>(request->timeout);
         bool timeout_enabled = request->timeout > 0.0f;
@@ -337,16 +347,24 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         RCLCPP_INFO(get_logger(), "Waiting for landing to complete...");
 
         while (rclcpp::ok()) {
-            // Check if we're on the ground (z close to 0 in NED frame)
-            // Allow some tolerance since the ground might not be exactly at z=0
-            if (std::abs(z_) < 0.5) {  // Within 0.5m of ground level
-                RCLCPP_INFO(get_logger(), "Landing complete: z=%.2f", z_);
+            // Check both PX4's land detector AND altitude as fallback
+            // This ensures landing detection works in both real hardware and simulation
+            bool altitude_landed = std::abs(z_) < 0.5;
 
-                // Transition to HOLD mode to exit LAND mode
-                // This prevents issues with repeated missions where vehicle stays in LAND mode
-                enableHoldMode();
-                RCLCPP_INFO(get_logger(), "Switched to HOLD mode after landing");
+            if (landed_ || altitude_landed) {
+                if (landed_) {
+                    RCLCPP_INFO(get_logger(), "Landing confirmed by PX4 land detector at z=%.2f", z_);
+                } else {
+                    RCLCPP_INFO(get_logger(), "Landing confirmed by altitude check at z=%.2f", z_);
+                }
+
+                // Brief delay to ensure stable on ground
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                // Reset home position to recalibrate altitude reference
+                // This prevents altitude drift in SITL after landing
+                resetHomePosition();
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
                 break;
             }
@@ -469,11 +487,34 @@ void PX4OffboardManager::sendVehicleCommand(px4_msgs::msg::VehicleCommand& msg)
 
 void PX4OffboardManager::arm()
 {
+    // Start offboard heartbeat signal if not already running
+    // This is needed for PX4 SITL to accept arm commands without RC
+    // Note: This only starts the heartbeat signal, NOT offboard flight mode
+    // The "switch to offboard mode" block will enable actual offboard flight mode
+    if (!offboard_heartbeat_thread_run_flag_) {
+        RCLCPP_INFO(get_logger(), "Starting offboard signal for arming...");
+
+        // Initialize target setpoints to current position (hold position)
+        target_x_ = x_;
+        target_y_ = y_;
+        target_z_ = z_;
+        target_heading_ = heading_;
+
+        // Start the heartbeat thread
+        offboard_heartbeat_thread_run_flag_ = true;
+        offboard_heartbeat_thread_ = std::make_unique<std::thread>(
+            &PX4OffboardManager::sendOffboardHeartbeat, this);
+
+        // Wait for PX4 to recognize the offboard signal
+        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+    }
+
     px4_msgs::msg::VehicleCommand msg{};
     msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
     msg.param1 = 1.0f;  // 1 = arm
-    msg.param2 = 0.0f;  // 0 = normal, 21196 = force
+    msg.param2 = 0.0f;  // Normal arm - offboard heartbeat provides control signal
     sendVehicleCommand(msg);
+    RCLCPP_INFO(get_logger(), "Arm command sent");
 }
 
 void PX4OffboardManager::disarm()
@@ -481,8 +522,9 @@ void PX4OffboardManager::disarm()
     px4_msgs::msg::VehicleCommand msg{};
     msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_COMPONENT_ARM_DISARM;
     msg.param1 = 0.0f;  // 0 = disarm
-    msg.param2 = 0.0f;
+    msg.param2 = 0.0f;  // Normal disarm (force disarm causes 60s re-arm lockout)
     sendVehicleCommand(msg);
+    RCLCPP_INFO(get_logger(), "Disarm command sent");
 }
 
 void PX4OffboardManager::takeoff(float altitude)
@@ -503,11 +545,14 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
 {
     RCLCPP_INFO(get_logger(), "Starting offboard takeoff to %.2f meters", altitude);
 
-    // Start offboard heartbeat if not already running
+    // Ensure offboard mode is enabled
+    // This handles the case where arm() started heartbeat but didn't enable offboard mode
     if (!offboard_heartbeat_thread_run_flag_) {
         startOffboardHeartbeat();
-        // Brief delay to ensure offboard mode is established
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    } else {
+        // Heartbeat running (from arm), just enable offboard mode
+        enableOffboardMode();
     }
 
     // Wait for valid heading data (up to 2 seconds)
@@ -546,6 +591,17 @@ void PX4OffboardManager::land()
     RCLCPP_INFO(get_logger(), "Landing initiated - offboard heartbeat stopped");
 }
 
+void PX4OffboardManager::resetHomePosition()
+{
+    // Reset home position to current location
+    // This resets the local frame origin, which helps prevent altitude drift after landing
+    px4_msgs::msg::VehicleCommand msg{};
+    msg.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_HOME;
+    msg.param1 = 1.0f;  // 1 = use current location
+    sendVehicleCommand(msg);
+    RCLCPP_INFO(get_logger(), "Home position reset to current location");
+}
+
 void PX4OffboardManager::enableOffboardMode()
 {
     px4_msgs::msg::VehicleCommand msg{};
@@ -576,7 +632,10 @@ void PX4OffboardManager::sendTrajectorySetpointPosition(float x, float y, float 
 
 void PX4OffboardManager::startOffboardHeartbeat()
 {
+    // If heartbeat already running (e.g., started by arm()), just enable offboard mode
     if (offboard_heartbeat_thread_run_flag_) {
+        RCLCPP_INFO(get_logger(), "Heartbeat already running, enabling offboard mode");
+        enableOffboardMode();
         return;
     }
 

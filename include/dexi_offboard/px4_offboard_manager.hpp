@@ -8,6 +8,7 @@
 #include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_land_detected.hpp>
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
 #include <dexi_interfaces/srv/execute_blockly_command.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -38,6 +39,7 @@ private:
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_pos_subscriber_;
     rclcpp::Subscription<dexi_interfaces::msg::OffboardNavCommand>::SharedPtr offboard_command_subscriber_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr pause_setpoints_subscriber_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr vehicle_land_detected_subscriber_;
 
     // ROS services
     rclcpp::Service<dexi_interfaces::srv::ExecuteBlocklyCommand>::SharedPtr blockly_command_service_;
@@ -65,7 +67,10 @@ private:
     double position_tolerance_{0.25};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
 
-    // Parameters
+    // Landing detection
+    std::atomic<bool> landed_{false};
+
+    // Parameters (read by GUI to show/hide keyboard control option)
     bool keyboard_control_enabled_{false};
 
     // Offboard control
@@ -86,6 +91,7 @@ private:
     void vehicleLocalPosCallback(const px4_msgs::msg::VehicleLocalPosition::SharedPtr msg);
     void handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg);
     void handlePauseSetpoints(const std_msgs::msg::Bool::SharedPtr msg);
+    void vehicleLandDetectedCallback(const px4_msgs::msg::VehicleLandDetected::SharedPtr msg);
     void executeBlocklyCommandCallback(
         const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
         std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response);
@@ -99,7 +105,7 @@ private:
     void land();
     void enableOffboardMode();
     void enableHoldMode();
-    void enableStabilizedMode();
+    void resetHomePosition();
 
     // Movement methods
     void flyForward(float distance);
