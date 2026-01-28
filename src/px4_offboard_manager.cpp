@@ -410,8 +410,13 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
     } else if (request->command == "yaw_right") {
         yawRight(request->parameter);
     } else if (request->command == "goto_ned") {
-        // Use pending values that should have been set via setGotoNEDParams
-        gotoNED(pending_north_, pending_east_, pending_down_, pending_yaw_);
+        // If NED fields are provided in request, use them directly
+        // Otherwise fall back to pending values for backward compatibility
+        if (request->north != 0.0f || request->east != 0.0f || request->down != 0.0f) {
+            gotoNED(request->north, request->east, request->down, request->yaw);
+        } else {
+            gotoNED(pending_north_, pending_east_, pending_down_, pending_yaw_);
+        }
     } else if (request->command == "circle") {
         // flyCircle is a blocking call that runs the entire trajectory
         flyCircle(request->parameter);
