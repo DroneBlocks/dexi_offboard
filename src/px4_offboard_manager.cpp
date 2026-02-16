@@ -194,6 +194,7 @@ bool PX4OffboardManager::isTargetReached()
 void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    control_mode_ = ControlMode::POSITION;
     target_x_ = x;
     target_y_ = y;
     target_z_ = z;
@@ -256,6 +257,10 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
                     msg->north, msg->east, msg->down, msg->yaw);
     } else if (msg->command == "goto_ned") {
         gotoNED(msg->north, msg->east, msg->down, msg->yaw);
+    } else if (msg->command == "set_velocity_body") {
+        setVelocityBody(msg->north, msg->east, msg->down, msg->yaw);
+    } else if (msg->command == "stop_velocity") {
+        stopVelocity();
     } else if (msg->command == "circle") {
         flyCircle(distance_or_degrees);
     } else if (msg->command == "switch_offboard_mode") {
@@ -514,6 +519,13 @@ void PX4OffboardManager::arm()
         target_z_ = z_;
         target_heading_ = heading_;
 
+        // Reset to position mode
+        control_mode_ = ControlMode::POSITION;
+        vel_x_ned_ = 0.0;
+        vel_y_ned_ = 0.0;
+        vel_z_ned_ = 0.0;
+        vel_yawspeed_ = 0.0;
+
         // Start the heartbeat thread
         offboard_heartbeat_thread_run_flag_ = true;
         offboard_heartbeat_thread_ = std::make_unique<std::thread>(
@@ -661,6 +673,13 @@ void PX4OffboardManager::startOffboardHeartbeat()
     target_z_ = z_;
     target_heading_ = heading_;
 
+    // Reset to position mode
+    control_mode_ = ControlMode::POSITION;
+    vel_x_ned_ = 0.0;
+    vel_y_ned_ = 0.0;
+    vel_z_ned_ = 0.0;
+    vel_yawspeed_ = 0.0;
+
     offboard_heartbeat_thread_run_flag_ = true;
     offboard_heartbeat_thread_ = std::make_unique<std::thread>(
         &PX4OffboardManager::sendOffboardHeartbeat, this);
@@ -692,26 +711,119 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 {
     const std::chrono::milliseconds sleep_duration(50);  // 20Hz
     while (offboard_heartbeat_thread_run_flag_) {
+        // Read control mode and values under lock
+        ControlMode mode;
+        double tx, ty, tz, th;
+        double vx, vy, vz, vyaw;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            mode = control_mode_;
+            tx = target_x_;
+            ty = target_y_;
+            tz = target_z_;
+            th = target_heading_;
+            vx = vel_x_ned_;
+            vy = vel_y_ned_;
+            vz = vel_z_ned_;
+            vyaw = vel_yawspeed_;
+        }
+
+        // Set heartbeat flags based on control mode
+        if (mode == ControlMode::VELOCITY) {
+            offboard_heartbeat_.position = false;
+            offboard_heartbeat_.velocity = true;
+        } else {
+            offboard_heartbeat_.position = true;
+            offboard_heartbeat_.velocity = false;
+        }
+
         // Always send offboard control mode (keeps offboard mode active)
         offboard_heartbeat_.timestamp = getTimestamp();
         offboard_mode_publisher_->publish(offboard_heartbeat_);
 
         // Only send setpoints if not paused (allows external nodes to control)
         if (!setpoints_paused_) {
-            // Copy target values under lock to avoid race conditions
-            double tx, ty, tz, th;
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                tx = target_x_;
-                ty = target_y_;
-                tz = target_z_;
-                th = target_heading_;
+            if (mode == ControlMode::VELOCITY) {
+                sendTrajectorySetpointVelocity(vx, vy, vz, vyaw);
+            } else {
+                sendTrajectorySetpointPosition(tx, ty, tz, th);
             }
-            sendTrajectorySetpointPosition(tx, ty, tz, th);
         }
 
         std::this_thread::sleep_for(sleep_duration);
     }
+}
+
+// Velocity control methods
+void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw_rate_deg)
+{
+    // If all inputs are near zero, stop velocity mode
+    if (std::abs(vx) < 0.01f && std::abs(vy) < 0.01f && std::abs(vz) < 0.01f && std::abs(yaw_rate_deg) < 0.1f) {
+        stopVelocity();
+        return;
+    }
+
+    // Ensure offboard mode is active
+    if (offboard_heartbeat_thread_run_flag_) {
+        enableOffboardMode();
+    }
+
+    // Rotate body-frame XY velocity to NED using current heading
+    double current_heading;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        current_heading = heading_;
+    }
+
+    double cos_h = std::cos(current_heading);
+    double sin_h = std::sin(current_heading);
+    double ned_x = vx * cos_h - vy * sin_h;
+    double ned_y = vx * sin_h + vy * cos_h;
+    double ned_z = vz;  // Down is positive in NED, passed through directly
+    double yawspeed = yaw_rate_deg * M_PI / 180.0;
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        vel_x_ned_ = ned_x;
+        vel_y_ned_ = ned_y;
+        vel_z_ned_ = ned_z;
+        vel_yawspeed_ = yawspeed;
+        control_mode_ = ControlMode::VELOCITY;
+    }
+    target_active_.store(false);
+
+    RCLCPP_INFO(get_logger(), "Velocity body: vx=%.2f vy=%.2f vz=%.2f yaw_rate=%.1f°/s -> NED: [%.2f, %.2f, %.2f]",
+                vx, vy, vz, yaw_rate_deg, ned_x, ned_y, ned_z);
+}
+
+void PX4OffboardManager::stopVelocity()
+{
+    // Capture current position as hold target
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    target_x_ = x_;
+    target_y_ = y_;
+    target_z_ = z_;
+    target_heading_ = heading_;
+    vel_x_ned_ = 0.0;
+    vel_y_ned_ = 0.0;
+    vel_z_ned_ = 0.0;
+    vel_yawspeed_ = 0.0;
+    control_mode_ = ControlMode::POSITION;
+    target_active_.store(false);
+
+    RCLCPP_INFO(get_logger(), "Velocity stopped - position hold at (%.2f, %.2f, %.2f) heading %.2f°",
+                target_x_, target_y_, target_z_, target_heading_ * 180.0 / M_PI);
+}
+
+void PX4OffboardManager::sendTrajectorySetpointVelocity(float vx, float vy, float vz, float yawspeed)
+{
+    px4_msgs::msg::TrajectorySetpoint msg{};
+    msg.timestamp = getTimestamp();
+    msg.position = {NAN, NAN, NAN};
+    msg.velocity = {static_cast<float>(vx), static_cast<float>(vy), static_cast<float>(vz)};
+    msg.yaw = NAN;
+    msg.yawspeed = yawspeed;
+    trajectory_setpoint_publisher_->publish(msg);
 }
 
 // Movement methods
@@ -960,7 +1072,9 @@ void PX4OffboardManager::flyCircle(float radius)
         // Calculate heading tangent to circle (facing forward along path)
         double target_heading = start_heading + angle;
 
-        // Send offboard control mode to keep offboard mode active
+        // Send offboard control mode to keep offboard mode active (force position mode)
+        offboard_heartbeat_.position = true;
+        offboard_heartbeat_.velocity = false;
         offboard_heartbeat_.timestamp = getTimestamp();
         offboard_mode_publisher_->publish(offboard_heartbeat_);
 
