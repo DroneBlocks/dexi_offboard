@@ -65,21 +65,21 @@ class DroneBlocksCircleMissionClient(Node):
         """Execute complete circle mission"""
         import time
 
-        # 1. Arm the drone
-        if not self.execute_command('arm'):
-            return False
-
-        time.sleep(1.0)
-
-        # 2. Use standard takeoff to get airborne (auto mode)
-        if not self.execute_command('takeoff', parameter=3.0, timeout=30.0):
-            return False
-
-        # 3. Switch to offboard mode for precision flight
+        # 1. Start offboard heartbeat (wait for PX4 to accept offboard mode)
         if not self.execute_command('start_offboard_heartbeat'):
             return False
 
-        time.sleep(2.0)  # Wait for offboard mode to be established
+        time.sleep(3.0)
+
+        # 2. Arm the drone
+        if not self.execute_command('arm'):
+            return False
+
+        time.sleep(3.0)
+
+        # 3. Offboard takeoff to 3 meters (matches DroneBlocks GUI flow)
+        if not self.execute_command('offboard_takeoff', parameter=3.0, timeout=30.0):
+            return False
 
         # 4. Fly in a circle
         self.get_logger().info(f'Starting smooth circle flight with radius {radius}m...')

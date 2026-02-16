@@ -19,6 +19,8 @@
 #include <cmath>
 #include <chrono>
 
+enum class ControlMode { POSITION, VELOCITY };
+
 class PX4OffboardManager : public rclcpp::Node
 {
 public:
@@ -59,6 +61,11 @@ private:
 
     // Target setpoints for offboard control
     double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
+
+    // Velocity control
+    ControlMode control_mode_{ControlMode::POSITION};
+    double vel_x_ned_{0.0}, vel_y_ned_{0.0}, vel_z_ned_{0.0};
+    double vel_yawspeed_{0.0};
 
     // Temporary storage for goto_ned parameters (used by service)
     double pending_north_{0.0}, pending_east_{0.0}, pending_down_{0.0}, pending_yaw_{0.0};
@@ -122,6 +129,11 @@ private:
     void yawRight(float angle);
     void gotoNED(float north, float east, float down, float yaw);
     void setGotoNEDParams(float north, float east, float down, float yaw);
+
+    // Velocity control methods
+    void setVelocityBody(float vx, float vy, float vz, float yaw_rate);
+    void stopVelocity();
+    void sendTrajectorySetpointVelocity(float vx, float vy, float vz, float yawspeed);
 
     // Target reached detection
     bool isTargetReached();
