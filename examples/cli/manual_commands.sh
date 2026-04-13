@@ -29,7 +29,7 @@ send_dexi_command() {
     local description=${3:-"Sending command: $command"}
 
     echo -e "${GREEN}$description${NC}"
-    ros2 topic pub --once $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: '$command', distance_or_degrees: $value}"
+    ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: '$command', distance_or_degrees: $value}"
 }
 
 # =============================================================================
