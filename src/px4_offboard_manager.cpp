@@ -757,9 +757,13 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 // Velocity control methods
 void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw_rate_deg)
 {
-    // If all inputs are near zero, stop velocity mode
+    // All-zero input only means "stop" if we are currently in velocity mode.
+    // A phantom zero from a stale frontend loop must not clobber an active
+    // position target (e.g. an in-progress takeoff).
     if (std::abs(vx) < 0.01f && std::abs(vy) < 0.01f && std::abs(vz) < 0.01f && std::abs(yaw_rate_deg) < 0.1f) {
-        stopVelocity();
+        if (control_mode_ == ControlMode::VELOCITY) {
+            stopVelocity();
+        }
         return;
     }
 
