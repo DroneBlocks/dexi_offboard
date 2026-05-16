@@ -26,29 +26,31 @@ ros2 launch dexi_offboard offboard_sitl.launch.py
 
 ### 2. Basic Flight Sequence
 
-Once the node is running, you can control the drone using ROS2 topics:
+Once the node is running, you can control the drone using ROS2 topics.
+
+> **Note:** The `offboard_manager` subscriber uses a `BEST_EFFORT` / `TRANSIENT_LOCAL` QoS profile (shared with PX4 `/fmu/*` topics), so `ros2 topic pub` must be invoked with `--qos-reliability best_effort --qos-durability transient_local`. Without these flags the CLI publisher's default `RELIABLE` / `VOLATILE` QoS is incompatible and no messages are delivered (`DURABILITY_QOS_POLICY` warning). The Python examples under `examples/python/` configure the matching QoS in code.
 
 ```bash
 # 1. Start offboard heartbeat (required before other commands)
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
 
 # 2. Arm the vehicle
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
 
 # 3. Takeoff to 2 meters (standard PX4 auto mode)
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'takeoff', distance_or_degrees: 2.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'takeoff', distance_or_degrees: 2.0}"
 
 # OR 3. Offboard Takeoff (pure offboard mode with altitude setpoints)
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'offboard_takeoff', distance_or_degrees: 2.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'offboard_takeoff', distance_or_degrees: 2.0}"
 
 # 4. Land
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
 
 # 5. Disarm
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
 
 # 6. Stop offboard heartbeat
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
 ```
 
 ## Available Commands
@@ -97,45 +99,45 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 
 ```bash
 # Start offboard mode
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
 
 # Arm and takeoff
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'takeoff', distance_or_degrees: 3.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'takeoff', distance_or_degrees: 3.0}"
 
 # Wait for takeoff to complete, then fly a square pattern
 sleep 5
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_forward', distance_or_degrees: 5.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_forward', distance_or_degrees: 5.0}"
 sleep 3
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_right', distance_or_degrees: 5.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_right', distance_or_degrees: 5.0}"
 sleep 3
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_backward', distance_or_degrees: 5.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_backward', distance_or_degrees: 5.0}"
 sleep 3
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_left', distance_or_degrees: 5.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'fly_left', distance_or_degrees: 5.0}"
 
 # Land and disarm
 sleep 3
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
 sleep 5
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
 ```
 
 ### Automated Box Mission
 
 ```bash
 # Start offboard mode and arm
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'start_offboard_heartbeat'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'arm'}"
 
 # Takeoff using offboard mode
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'offboard_takeoff', distance_or_degrees: 2.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'offboard_takeoff', distance_or_degrees: 2.0}"
 
 # Optional: Set custom delay between waypoints (default is 1.0 seconds)
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'set_mission_delay', distance_or_degrees: 2.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'set_mission_delay', distance_or_degrees: 2.0}"
 
 # Execute automated 5m x 5m box mission at current altitude
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'box_mission', distance_or_degrees: 5.0}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'box_mission', distance_or_degrees: 5.0}"
 
 # The drone will automatically:
 # 1. Fly forward 5m at current altitude → target reached → settle 2.0s
@@ -144,9 +146,9 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 # 4. Fly left 5m back to start at current altitude → target reached → mission complete!
 
 # Land and disarm
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
-ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}"
+ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
 ```
 
 ## Prerequisites

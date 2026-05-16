@@ -35,7 +35,7 @@ send_command() {
     local description=$3
 
     echo -e "${GREEN}$description${NC}"
-    ros2 topic pub --once $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: '$command', distance_or_degrees: $value}"
+    ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: '$command', distance_or_degrees: $value}"
 
     # Wait for command to be processed
     sleep 2
@@ -96,15 +96,15 @@ cleanup() {
 
     # Emergency landing sequence
     echo -e "${YELLOW}Sending emergency land command...${NC}"
-    ros2 topic pub --once $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}" || true
+    ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: 'land'}" || true
     sleep 5
 
     echo -e "${YELLOW}Sending disarm command...${NC}"
-    ros2 topic pub --once $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}" || true
+    ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: 'disarm'}" || true
     sleep 2
 
     echo -e "${YELLOW}Stopping offboard heartbeat...${NC}"
-    ros2 topic pub --once $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}" || true
+    ros2 topic pub --once --qos-reliability best_effort --qos-durability transient_local $TOPIC dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}" || true
 
     echo -e "${RED}Emergency shutdown completed.${NC}"
     exit 1
