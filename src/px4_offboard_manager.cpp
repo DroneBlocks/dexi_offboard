@@ -52,12 +52,8 @@ void PX4OffboardManager::initializePublishers()
 
 void PX4OffboardManager::initializeSubscribers()
 {
-    // PX4 renamed this topic with a message-version suffix, and which name
-    // exists depends on the firmware. Subscribing only to the unsuffixed name
-    // meant vehicleStatusCallback never fired on ark/pi6x 1.16.2: no arming
-    // state, no nav state, no land detection, for the whole life of this node.
-    // Measured: /fmu/out/vehicle_status 0 messages in 8 s, _v1 15 messages.
-    // Subscribe to both; only one of them publishes.
+    // Which name PX4 publishes depends on the firmware. Only one of these
+    // exists on any given board.
     vehicle_status_subscriber_ = create_subscription<px4_msgs::msg::VehicleStatus>(
         "/fmu/out/vehicle_status",
         qos_profile_,
@@ -133,12 +129,8 @@ void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatu
             }
         }
 
-        // The pilot (or a failsafe) has taken the aircraft out of offboard.
-        // Nothing used to notice, so the heartbeat thread kept publishing
-        // OffboardControlMode and a stale TrajectorySetpoint at 20 Hz
-        // underneath manual control. It is audible: the motors sputter as the
-        // two setpoint sources contend. Only reachable now that this callback
-        // fires at all -- it was subscribed to a topic PX4 does not publish.
+        // The pilot or a failsafe has taken the aircraft. Stop publishing
+        // setpoints underneath manual control.
         if (prev_vehicle_status_msg_->nav_state ==
                 px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
             msg->nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
@@ -331,10 +323,8 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
     if (request->command == "arm") {
         arm();
-        // Wait for the vehicle to actually arm. This used to return success as
-        // soon as the command was published, so a rejected arm was
-        // indistinguishable from a good one and the failure surfaced 30 s later
-        // as "takeoff timed out", blaming the wrong step.
+        // Wait for the vehicle to actually arm, so a rejected arm fails here
+        // rather than as a takeoff timeout later.
         {
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
             while (!armed_.load() && std::chrono::steady_clock::now() < deadline) {
@@ -399,13 +389,8 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
         command_has_target = false;  // Already handled waiting above
     } else if (request->command == "offboard_takeoff") {
-        // Height sanity gate. offboard_takeoff commands z - altitude, so the
-        // climb is only meaningful if z is near zero on the ground. The height
-        // reference is the rangefinder, which reads invalid below its minimum
-        // range, so on the ground the estimate has no correction and keeps
-        // whatever offset the last flight ended with. Measured on an ARK CM4:
-        // +1.63 m while sitting on the floor. Taking off from there makes the
-        // estimate jump by that amount when the rangefinder acquires, mid-climb.
+        // The climb is commanded as z - altitude, so it only means anything
+        // if z is near zero on the ground.
         if (!armed_.load() && std::abs(z_) > kGroundHeightGate) {
             response->success = false;
             response->message = "Height estimate is " + std::to_string(z_) +

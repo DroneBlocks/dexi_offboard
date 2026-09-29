@@ -80,7 +80,7 @@ private:
     mutable std::mutex state_mutex_;
     double position_tolerance_{0.25};  // meters
     // Refuse an offboard takeoff if the on-ground height estimate is further
-    // than this from zero. See the gate in executeBlocklyCommandCallback.
+    // than this from zero.
     static constexpr double kGroundHeightGate{0.30};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
 
