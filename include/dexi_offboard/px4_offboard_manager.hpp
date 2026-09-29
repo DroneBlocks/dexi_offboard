@@ -38,6 +38,7 @@ private:
 
     // ROS subscribers
     rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_subscriber_;
+    rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr vehicle_status_v1_subscriber_;
     rclcpp::Subscription<px4_msgs::msg::VehicleGlobalPosition>::SharedPtr vehicle_global_pos_subscriber_;
     rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr vehicle_local_pos_subscriber_;
     rclcpp::Subscription<dexi_interfaces::msg::OffboardNavCommand>::SharedPtr offboard_command_subscriber_;
@@ -58,6 +59,8 @@ private:
     std::shared_ptr<px4_msgs::msg::VehicleStatus> prev_vehicle_status_msg_;
     double lat_{0.0}, lon_{0.0}, alt_{0.0};
     double x_{0.0}, y_{0.0}, z_{0.0}, heading_{0.0};
+    double dist_bottom_{0.0};
+    std::atomic<bool> dist_bottom_valid_{false};
 
     // Target setpoints for offboard control
     double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
@@ -76,10 +79,14 @@ private:
     // Mutex for thread-safe access to position/heading state
     mutable std::mutex state_mutex_;
     double position_tolerance_{0.25};  // meters
+    // Refuse an offboard takeoff if the on-ground height estimate is further
+    // than this from zero. See the gate in executeBlocklyCommandCallback.
+    static constexpr double kGroundHeightGate{0.30};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
 
     // Landing detection
     std::atomic<bool> landed_{false};
+    std::atomic<bool> armed_{false};
 
     // Parameters (read by GUI to show/hide keyboard control option)
     bool keyboard_control_enabled_{false};

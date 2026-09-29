@@ -52,8 +52,19 @@ void PX4OffboardManager::initializePublishers()
 
 void PX4OffboardManager::initializeSubscribers()
 {
+    // PX4 renamed this topic with a message-version suffix, and which name
+    // exists depends on the firmware. Subscribing only to the unsuffixed name
+    // meant vehicleStatusCallback never fired on ark/pi6x 1.16.2: no arming
+    // state, no nav state, no land detection, for the whole life of this node.
+    // Measured: /fmu/out/vehicle_status 0 messages in 8 s, _v1 15 messages.
+    // Subscribe to both; only one of them publishes.
     vehicle_status_subscriber_ = create_subscription<px4_msgs::msg::VehicleStatus>(
         "/fmu/out/vehicle_status",
+        qos_profile_,
+        std::bind(&PX4OffboardManager::vehicleStatusCallback, this, std::placeholders::_1));
+
+    vehicle_status_v1_subscriber_ = create_subscription<px4_msgs::msg::VehicleStatus>(
+        "/fmu/out/vehicle_status_v1",
         qos_profile_,
         std::bind(&PX4OffboardManager::vehicleStatusCallback, this, std::placeholders::_1));
 
@@ -107,6 +118,8 @@ void PX4OffboardManager::initializeTimer()
 
 void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatus::SharedPtr msg)
 {
+    armed_.store(msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED);
+
     if (!prev_vehicle_status_msg_) {
         // First message received
         RCLCPP_INFO(get_logger(), "Initial vehicle status received");
@@ -118,6 +131,23 @@ void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatu
             } else if (msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED) {
                 RCLCPP_INFO(get_logger(), "Vehicle armed");
             }
+        }
+
+        // The pilot (or a failsafe) has taken the aircraft out of offboard.
+        // Nothing used to notice, so the heartbeat thread kept publishing
+        // OffboardControlMode and a stale TrajectorySetpoint at 20 Hz
+        // underneath manual control. It is audible: the motors sputter as the
+        // two setpoint sources contend. Only reachable now that this callback
+        // fires at all -- it was subscribed to a topic PX4 does not publish.
+        if (prev_vehicle_status_msg_->nav_state ==
+                px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
+            msg->nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
+            offboard_heartbeat_thread_run_flag_.load()) {
+            RCLCPP_WARN(get_logger(),
+                        "Left offboard mode (nav_state %u) - stopping heartbeat",
+                        msg->nav_state);
+            clearTarget();
+            stopOffboardHeartbeat();
         }
 
         // Check navigation state changes
@@ -156,7 +186,9 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
         y_ = msg->y;
         z_ = msg->z;
         heading_ = msg->heading;
+        dist_bottom_ = msg->dist_bottom;
     }
+    dist_bottom_valid_.store(msg->dist_bottom_valid);
 
     // Position hold is now set once in clearTarget() rather than continuously here.
     // Continuously updating target to current position caused altitude drift on real hardware
@@ -299,6 +331,25 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
     if (request->command == "arm") {
         arm();
+        // Wait for the vehicle to actually arm. This used to return success as
+        // soon as the command was published, so a rejected arm was
+        // indistinguishable from a good one and the failure surfaced 30 s later
+        // as "takeoff timed out", blaming the wrong step.
+        {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!armed_.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!armed_.load()) {
+                response->success = false;
+                response->message = "Arm rejected by PX4 (still disarmed after 5s)";
+                response->execution_time =
+                    std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+                RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+                return;
+            }
+            RCLCPP_INFO(get_logger(), "Arm confirmed");
+        }
         command_has_target = false;  // Immediate command
     } else if (request->command == "disarm") {
         disarm();
@@ -348,6 +399,22 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
         command_has_target = false;  // Already handled waiting above
     } else if (request->command == "offboard_takeoff") {
+        // Height sanity gate. offboard_takeoff commands z - altitude, so the
+        // climb is only meaningful if z is near zero on the ground. The height
+        // reference is the rangefinder, which reads invalid below its minimum
+        // range, so on the ground the estimate has no correction and keeps
+        // whatever offset the last flight ended with. Measured on an ARK CM4:
+        // +1.63 m while sitting on the floor. Taking off from there makes the
+        // estimate jump by that amount when the rangefinder acquires, mid-climb.
+        if (!armed_.load() && std::abs(z_) > kGroundHeightGate) {
+            response->success = false;
+            response->message = "Height estimate is " + std::to_string(z_) +
+                " m on the ground, expected near 0. Power-cycle the flight controller.";
+            response->execution_time =
+                std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+            RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+            return;
+        }
         offboardTakeoff(request->parameter);
         command_has_target = true;  // Offboard takeoff uses target tracking
     } else if (request->command == "land") {
