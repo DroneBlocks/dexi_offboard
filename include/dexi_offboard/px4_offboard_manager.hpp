@@ -61,6 +61,17 @@ private:
     double x_{0.0}, y_{0.0}, z_{0.0}, heading_{0.0};
     double dist_bottom_{0.0};
     std::atomic<bool> dist_bottom_valid_{false};
+    std::atomic<uint8_t> nav_state_{0};
+    std::atomic<bool> ground_contact_{false};
+
+    // Touchdown watchdog. PX4's land detector needs ground_contact to hold
+    // through maybe_landed and landed before COM_DISARM_LAND starts counting.
+    // On a rangefinder-only aircraft that takes ~13 s, all of it spent armed on
+    // the floor chasing a height estimate that has no valid source below
+    // EKF2_MIN_RNG. Every metre of landing drift we have measured accumulates
+    // in that window. This disarms at ground contact instead.
+    std::atomic<bool> touchdown_watch_{false};
+    std::chrono::steady_clock::time_point land_commanded_at_{};
 
     // Target setpoints for offboard control
     double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
@@ -82,6 +93,10 @@ private:
     // Refuse an offboard takeoff if the on-ground height estimate is further
     // than this from zero.
     static constexpr double kGroundHeightGate{0.30};  // meters
+    // Second opinion on touchdown, independent of the land detector. Chosen well
+    // above the noise: on the floor dist_bottom reads a median 0.00 m, and in a
+    // 1.6 m hover it never came within 1.2 m of this.
+    static constexpr double kTouchdownDistBottom{0.30};  // meters
     double heading_tolerance_{0.1};   // radians (~5.7 degrees)
 
     // Landing detection
@@ -110,6 +125,8 @@ private:
     void handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg);
     void handlePauseSetpoints(const std_msgs::msg::Bool::SharedPtr msg);
     void vehicleLandDetectedCallback(const px4_msgs::msg::VehicleLandDetected::SharedPtr msg);
+    void checkTouchdown();
+    void forceDisarm();
     void executeBlocklyCommandCallback(
         const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
         std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response);
