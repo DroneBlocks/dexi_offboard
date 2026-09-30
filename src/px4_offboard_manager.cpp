@@ -52,8 +52,15 @@ void PX4OffboardManager::initializePublishers()
 
 void PX4OffboardManager::initializeSubscribers()
 {
+    // Which name PX4 publishes depends on the firmware. Only one of these
+    // exists on any given board.
     vehicle_status_subscriber_ = create_subscription<px4_msgs::msg::VehicleStatus>(
         "/fmu/out/vehicle_status",
+        qos_profile_,
+        std::bind(&PX4OffboardManager::vehicleStatusCallback, this, std::placeholders::_1));
+
+    vehicle_status_v1_subscriber_ = create_subscription<px4_msgs::msg::VehicleStatus>(
+        "/fmu/out/vehicle_status_v1",
         qos_profile_,
         std::bind(&PX4OffboardManager::vehicleStatusCallback, this, std::placeholders::_1));
 
@@ -107,6 +114,8 @@ void PX4OffboardManager::initializeTimer()
 
 void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatus::SharedPtr msg)
 {
+    armed_.store(msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED);
+
     if (!prev_vehicle_status_msg_) {
         // First message received
         RCLCPP_INFO(get_logger(), "Initial vehicle status received");
@@ -118,6 +127,19 @@ void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatu
             } else if (msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED) {
                 RCLCPP_INFO(get_logger(), "Vehicle armed");
             }
+        }
+
+        // The pilot or a failsafe has taken the aircraft. Stop publishing
+        // setpoints underneath manual control.
+        if (prev_vehicle_status_msg_->nav_state ==
+                px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
+            msg->nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
+            offboard_heartbeat_thread_run_flag_.load()) {
+            RCLCPP_WARN(get_logger(),
+                        "Left offboard mode (nav_state %u) - stopping heartbeat",
+                        msg->nav_state);
+            clearTarget();
+            stopOffboardHeartbeat();
         }
 
         // Check navigation state changes
@@ -156,7 +178,9 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
         y_ = msg->y;
         z_ = msg->z;
         heading_ = msg->heading;
+        dist_bottom_ = msg->dist_bottom;
     }
+    dist_bottom_valid_.store(msg->dist_bottom_valid);
 
     // Position hold is now set once in clearTarget() rather than continuously here.
     // Continuously updating target to current position caused altitude drift on real hardware
@@ -299,6 +323,23 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
     if (request->command == "arm") {
         arm();
+        // Wait for the vehicle to actually arm, so a rejected arm fails here
+        // rather than as a takeoff timeout later.
+        {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (!armed_.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (!armed_.load()) {
+                response->success = false;
+                response->message = "Arm rejected by PX4 (still disarmed after 5s)";
+                response->execution_time =
+                    std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+                RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+                return;
+            }
+            RCLCPP_INFO(get_logger(), "Arm confirmed");
+        }
         command_has_target = false;  // Immediate command
     } else if (request->command == "disarm") {
         disarm();
@@ -348,6 +389,17 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
         command_has_target = false;  // Already handled waiting above
     } else if (request->command == "offboard_takeoff") {
+        // The climb is commanded as z - altitude, so it only means anything
+        // if z is near zero on the ground.
+        if (!armed_.load() && std::abs(z_) > kGroundHeightGate) {
+            response->success = false;
+            response->message = "Height estimate is " + std::to_string(z_) +
+                " m on the ground, expected near 0. Power-cycle the flight controller.";
+            response->execution_time =
+                std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+            RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+            return;
+        }
         offboardTakeoff(request->parameter);
         command_has_target = true;  // Offboard takeoff uses target tracking
     } else if (request->command == "land") {
