@@ -8,6 +8,12 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
     // Note: keyboard_control_enabled is read by the GUI to show/hide keyboard control option
     this->declare_parameter("keyboard_control_enabled", false);
     keyboard_control_enabled_ = this->get_parameter("keyboard_control_enabled").as_bool();
+    // Arrival tolerances for goto-style commands. Were hardcoded; tag navigation
+    // needs them visible and, for hold_ned, irrelevant.
+    this->declare_parameter("position_tolerance", position_tolerance_);
+    this->declare_parameter("heading_tolerance", heading_tolerance_);
+    position_tolerance_ = this->get_parameter("position_tolerance").as_double();
+    heading_tolerance_ = this->get_parameter("heading_tolerance").as_double();
     RCLCPP_INFO(get_logger(), "Keyboard control enabled: %s", keyboard_control_enabled_ ? "true" : "false");
 
     // Configure QoS profile
@@ -48,6 +54,10 @@ void PX4OffboardManager::initializePublishers()
     
     trajectory_setpoint_publisher_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>(
         "/fmu/in/trajectory_setpoint", qos_profile_);
+    // What the manager is doing, for tag_nav and the GCS. JSON, 5 Hz.
+    status_publisher_ = create_publisher<std_msgs::msg::String>("/dexi/offboard_manager/status", 10);
+    local_pos_20hz_publisher_ = create_publisher<px4_msgs::msg::VehicleLocalPosition>(
+        "/fmu/out/vehicle_local_position_20hz", qos_profile_);
 }
 
 void PX4OffboardManager::initializeSubscribers()
@@ -102,8 +112,43 @@ void PX4OffboardManager::initializeServices()
         service_callback_group_);
 }
 
+void PX4OffboardManager::publishStatus()
+{
+    ControlMode mode;
+    double tx, ty, tz, th, vx, vy, vz;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        mode = control_mode_;
+        tx = target_x_; ty = target_y_; tz = target_z_; th = target_heading_;
+        vx = vel_x_ned_; vy = vel_y_ned_; vz = vel_z_ned_;
+    }
+    char buf[512];
+    std::snprintf(buf, sizeof(buf),
+        "{\"control_mode\": \"%s\", \"target\": {\"n\": %.3f, \"e\": %.3f, \"d\": %.3f, \"yaw_deg\": %.1f}, "
+        "\"target_active\": %s, \"hold_exact\": %s, \"velocity_ned\": {\"n\": %.3f, \"e\": %.3f, \"d\": %.3f}, "
+        "\"heartbeat\": %s, \"setpoints_paused\": %s, \"armed\": %s, \"landed\": %s, "
+        "\"position_tolerance\": %.3f}",
+        mode == ControlMode::VELOCITY ? "velocity" : "position",
+        tx, ty, tz, th * 180.0 / M_PI,
+        target_active_.load() ? "true" : "false", hold_exact_.load() ? "true" : "false",
+        vx, vy, vz,
+        offboard_heartbeat_thread_run_flag_.load() ? "true" : "false",
+        setpoints_paused_.load() ? "true" : "false",
+        armed_.load() ? "true" : "false", landed_.load() ? "true" : "false",
+        position_tolerance_);
+    std_msgs::msg::String msg;
+    msg.data = buf;
+    status_publisher_->publish(msg);
+}
+
 void PX4OffboardManager::initializeTimer()
 {
+    status_timer_ = create_wall_timer(std::chrono::milliseconds(200),
+                                      std::bind(&PX4OffboardManager::publishStatus, this));
+    local_pos_20hz_timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (have_local_pos_) local_pos_20hz_publisher_->publish(last_local_pos_);
+    });
     const double exec_frequency = 20.0; // Hz
     const std::chrono::nanoseconds timer_period{static_cast<int64_t>(1e9/exec_frequency)};
 
@@ -115,6 +160,18 @@ void PX4OffboardManager::initializeTimer()
 void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatus::SharedPtr msg)
 {
     armed_.store(msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED);
+    // "In offboard" for the hand-off latch means armed AND in OFFBOARD: PX4 stays in
+    // OFFBOARD after landing and disarming, and the EKF height can jump on the ground
+    // (SITL reset 3 m low at disarm), so a latch taken while disarmed holds garbage.
+    const bool now_offboard = armed_.load() &&
+        msg->nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
+    if (now_offboard && !in_offboard_.load() && !auto_offboard_.load()) {
+        // Pilot hand-off: the stream-only heartbeat has been following the aircraft,
+        // so the setpoint PX4 now obeys is where the aircraft is. Say so.
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        RCLCPP_INFO(get_logger(), "Hand-off: pilot switched to offboard, holding at (%.2f, %.2f, %.2f)", x_, y_, z_);
+    }
+    in_offboard_.store(now_offboard);
 
     if (!prev_vehicle_status_msg_) {
         // First message received
@@ -129,17 +186,29 @@ void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatu
             }
         }
 
-        // The pilot or a failsafe has taken the aircraft. Stop publishing
-        // setpoints underneath manual control.
+        // The pilot or a failsafe has taken the aircraft.
         if (prev_vehicle_status_msg_->nav_state ==
                 px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
             msg->nav_state != px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD &&
             offboard_heartbeat_thread_run_flag_.load()) {
-            RCLCPP_WARN(get_logger(),
-                        "Left offboard mode (nav_state %u) - stopping heartbeat",
-                        msg->nav_state);
-            clearTarget();
-            stopOffboardHeartbeat();
+            if (auto_offboard_.load()) {
+                // We commanded Offboard (GCS mission): stop publishing setpoints
+                // underneath manual control.
+                RCLCPP_WARN(get_logger(),
+                            "Left offboard mode (nav_state %u) - stopping heartbeat",
+                            msg->nav_state);
+                clearTarget();
+                stopOffboardHeartbeat();
+            } else {
+                // Stream-only hand-off: keep streaming so the pilot can re-enter
+                // Offboard later; the setpoint follows the aircraft again meanwhile.
+                // (Also fires on the native takeoff after a flight that ended in
+                // Offboard, which used to kill the stream before the hand-off.)
+                RCLCPP_INFO(get_logger(),
+                            "Left offboard mode (nav_state %u) - stream follows aircraft",
+                            msg->nav_state);
+                clearTarget();
+            }
         }
 
         // Check navigation state changes
@@ -179,6 +248,8 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
         z_ = msg->z;
         heading_ = msg->heading;
         dist_bottom_ = msg->dist_bottom;
+        last_local_pos_ = *msg;
+        have_local_pos_ = true;
     }
     dist_bottom_valid_.store(msg->dist_bottom_valid);
 
@@ -187,7 +258,8 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
     // as sensor noise/drift would be amplified into sustained movement.
 
     // Check if target is reached after position update
-    if (target_active_.load() && isTargetReached()) {
+    // hold_ned keeps the exact setpoint: no arrival, no re-latching at the current position.
+    if (target_active_.load() && !hold_exact_.load() && isTargetReached()) {
         RCLCPP_INFO(get_logger(), "Target reached! Position: (%.2f, %.2f, %.2f), Heading: %.2f°",
                    x_, y_, z_, heading_ * 180.0 / M_PI);
         clearTarget();
@@ -218,6 +290,7 @@ bool PX4OffboardManager::isTargetReached()
 void PX4OffboardManager::setTarget(double x, double y, double z, double heading)
 {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    hold_exact_.store(false);
     control_mode_ = ControlMode::POSITION;
     target_x_ = x;
     target_y_ = y;
@@ -238,6 +311,7 @@ void PX4OffboardManager::clearTarget()
     target_z_ = z_;
     target_heading_ = heading_;
     target_active_.store(false);
+    hold_exact_.store(false);
 }
 
 void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::OffboardNavCommand::SharedPtr msg)
@@ -245,7 +319,11 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
     RCLCPP_INFO(get_logger(), "Received command: %s", msg->command.c_str());
     float distance_or_degrees = msg->distance_or_degrees ? msg->distance_or_degrees : 1.0f;
 
-    if (msg->command == "start_offboard_heartbeat") {
+    if (msg->command == "start_setpoint_stream") {
+        auto_offboard_.store(false);
+        startOffboardHeartbeat();
+    } else if (msg->command == "start_offboard_heartbeat") {
+        auto_offboard_.store(true);
         startOffboardHeartbeat();
     } else if (msg->command == "stop_offboard_heartbeat") {
         stopOffboardHeartbeat();
@@ -281,6 +359,8 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
                     msg->north, msg->east, msg->down, msg->yaw);
     } else if (msg->command == "goto_ned") {
         gotoNED(msg->north, msg->east, msg->down, msg->yaw);
+    } else if (msg->command == "hold_ned") {
+        holdNED(msg->north, msg->east, msg->down, msg->yaw);
     } else if (msg->command == "set_velocity_body") {
         setVelocityBody(msg->north, msg->east, msg->down, msg->yaw);
     } else if (msg->command == "stop_velocity") {
@@ -344,7 +424,12 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
     } else if (request->command == "disarm") {
         disarm();
         command_has_target = false;  // Immediate command
+    } else if (request->command == "start_setpoint_stream") {
+        auto_offboard_.store(false);
+        startOffboardHeartbeat();
+        command_has_target = false;
     } else if (request->command == "start_offboard_heartbeat") {
+        auto_offboard_.store(true);
         startOffboardHeartbeat();
         command_has_target = false;  // Immediate command
     } else if (request->command == "stop_offboard_heartbeat") {
@@ -474,10 +559,20 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         } else {
             gotoNED(pending_north_, pending_east_, pending_down_, pending_yaw_);
         }
+    } else if (request->command == "hold_ned") {
+        holdNED(request->north, request->east, request->down, request->yaw);
+        command_has_target = false;  // a hold is never "reached"; it returns at once
     } else if (request->command == "circle") {
         // flyCircle is a blocking call that runs the entire trajectory
         flyCircle(request->parameter);
         command_has_target = false;  // Already completed
+    } else if (request->command == "set_velocity_body") {
+        // Same contract as the topic: body-frame m/s in north/east/down, yaw rate in yaw.
+        setVelocityBody(request->north, request->east, request->down, request->yaw);
+        command_has_target = false;  // Immediate command
+    } else if (request->command == "stop_velocity") {
+        stopVelocity();
+        command_has_target = false;  // Immediate command
     } else if (request->command == "switch_offboard_mode") {
         enableOffboardMode();
         command_has_target = false;  // Immediate command
@@ -712,8 +807,12 @@ void PX4OffboardManager::startOffboardHeartbeat()
 {
     // If heartbeat already running (e.g., started by arm()), just enable offboard mode
     if (offboard_heartbeat_thread_run_flag_) {
-        RCLCPP_INFO(get_logger(), "Heartbeat already running, enabling offboard mode");
-        enableOffboardMode();
+        if (auto_offboard_.load()) {
+            RCLCPP_INFO(get_logger(), "Heartbeat already running, enabling offboard mode");
+            enableOffboardMode();
+        } else {
+            RCLCPP_INFO(get_logger(), "Heartbeat already running (stream only)");
+        }
         return;
     }
 
@@ -740,7 +839,7 @@ void PX4OffboardManager::startOffboardHeartbeat()
     offboard_timer_ = create_wall_timer(
         std::chrono::seconds(1),
         [this]() {
-            this->enableOffboardMode();
+            if (auto_offboard_.load()) this->enableOffboardMode();
             // Stop the timer after first execution
             offboard_timer_->cancel();
         }
@@ -769,6 +868,19 @@ void PX4OffboardManager::sendOffboardHeartbeat()
         double vx, vy, vz, vyaw;
         {
             std::lock_guard<std::mutex> lock(state_mutex_);
+            // Stream-only (pilot hand-off) and not yet in OFFBOARD: keep the
+            // setpoint on the aircraft itself, so the moment the pilot switches,
+            // PX4 holds where the aircraft is instead of flying to a stale point.
+            // (A hold latched on the ground at launch brings the aircraft straight
+            // down to that point when the pilot switches in the air.)
+            if (!auto_offboard_.load() && !in_offboard_.load()) {
+                target_x_ = x_;
+                target_y_ = y_;
+                target_z_ = z_;
+                target_heading_ = heading_;
+                control_mode_ = ControlMode::POSITION;
+                vel_x_ned_ = vel_y_ned_ = vel_z_ned_ = vel_yawspeed_ = 0.0;
+            }
             mode = control_mode_;
             tx = target_x_;
             ty = target_y_;
@@ -845,6 +957,7 @@ void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw
         vel_z_ned_ = ned_z;
         vel_yawspeed_ = yawspeed;
         control_mode_ = ControlMode::VELOCITY;
+        hold_exact_.store(false);
     }
     target_active_.store(false);
 
@@ -855,6 +968,7 @@ void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw
 void PX4OffboardManager::stopVelocity()
 {
     // Capture current position as hold target
+    hold_exact_.store(false);
     std::lock_guard<std::mutex> lock(state_mutex_);
     target_x_ = x_;
     target_y_ = y_;
@@ -1061,6 +1175,17 @@ void PX4OffboardManager::gotoNED(float north, float east, float down, float yaw)
     setTarget(north, east, down, yaw_rad);
     RCLCPP_INFO(get_logger(), "Going to NED position: N=%.2f, E=%.2f, D=%.2f, Yaw=%.2f°",
                 north, east, down, yaw);
+}
+
+// A pure position setpoint. Unlike gotoNED there is no arrival test and no
+// re-latching of the hold point at the current position, so an outer loop
+// (tag_nav) can refine it a few centimeters at a time and PX4 flies there.
+void PX4OffboardManager::holdNED(float north, float east, float down, float yaw)
+{
+    setTarget(north, east, down, yaw * M_PI / 180.0);
+    hold_exact_.store(true);
+    RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 2000,
+                         "Holding NED position: N=%.2f, E=%.2f, D=%.2f, Yaw=%.1f°", north, east, down, yaw);
 }
 
 void PX4OffboardManager::setGotoNEDParams(float north, float east, float down, float yaw)
