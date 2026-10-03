@@ -58,6 +58,9 @@ private:
     std::shared_ptr<px4_msgs::msg::VehicleStatus> prev_vehicle_status_msg_;
     double lat_{0.0}, lon_{0.0}, alt_{0.0};
     double x_{0.0}, y_{0.0}, z_{0.0}, heading_{0.0};
+    double dist_bottom_{0.0};        // rangefinder height above ground (reliable when EKF z diverges)
+    bool dist_bottom_valid_{false};
+    bool position_fresh_{false};  // Set false on stop, true on next localPos callback
 
     // Target setpoints for offboard control
     double target_x_{0.0}, target_y_{0.0}, target_z_{0.0}, target_heading_{0.0};
@@ -90,6 +93,10 @@ private:
     std::unique_ptr<std::thread> offboard_heartbeat_thread_;
     px4_msgs::msg::OffboardControlMode offboard_heartbeat_;
 
+    // Velocity-based takeoff (flow-only friendly: climb on velocity, then position-hold)
+    std::atomic<bool> velocity_takeoff_run_flag_{false};
+    std::unique_ptr<std::thread> velocity_takeoff_thread_;
+
     // Methods
     void initializePublishers();
     void initializeSubscribers();
@@ -113,6 +120,7 @@ private:
     void disarm();
     void takeoff(float altitude);
     void offboardTakeoff(float altitude);
+    void velocityTakeoff(float altitude);
     void land();
     void enableOffboardMode();
     void enableHoldMode();

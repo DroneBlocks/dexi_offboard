@@ -156,6 +156,9 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
         y_ = msg->y;
         z_ = msg->z;
         heading_ = msg->heading;
+        dist_bottom_ = msg->dist_bottom;
+        dist_bottom_valid_ = msg->dist_bottom_valid;
+        position_fresh_ = true;
     }
 
     // Position hold is now set once in clearTarget() rather than continuously here.
@@ -232,7 +235,11 @@ void PX4OffboardManager::handleOffboardCommand(const dexi_interfaces::msg::Offbo
     } else if (msg->command == "takeoff") {
         takeoff(distance_or_degrees);
     } else if (msg->command == "offboard_takeoff") {
-        offboardTakeoff(distance_or_degrees);
+        // Canvas "takeoff" block -> flow-friendly velocity climb. The old position-based
+        // offboardTakeoff() struggled on the ground with the flow-only EKF in CONST_POS.
+        velocityTakeoff(distance_or_degrees);
+    } else if (msg->command == "velocity_takeoff") {
+        velocityTakeoff(distance_or_degrees);
     } else if (msg->command == "land") {
         land();
     } else if (msg->command == "fly_forward") {
@@ -348,8 +355,25 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
 
         command_has_target = false;  // Already handled waiting above
     } else if (request->command == "offboard_takeoff") {
-        offboardTakeoff(request->parameter);
-        command_has_target = true;  // Offboard takeoff uses target tracking
+        // Flow-friendly velocity climb (was offboardTakeoff, which struggled in
+        // CONST_POS on the ground). Wait for the background climb monitor to finish
+        // (climb done + position hold), NOT the generic position-target tracking.
+        velocityTakeoff(request->parameter);
+        auto vt_timeout = std::chrono::duration<float>(request->timeout);
+        bool vt_timeout_en = request->timeout > 0.0f;
+        while (rclcpp::ok() && velocity_takeoff_run_flag_.load()) {
+            if (vt_timeout_en) {
+                auto elapsed = std::chrono::steady_clock::now() - start_time;
+                if (elapsed >= vt_timeout) {
+                    response->success = false;
+                    response->message = "Velocity takeoff timed out";
+                    response->execution_time = std::chrono::duration<float>(elapsed).count();
+                    return;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        command_has_target = false;  // handled the wait above
     } else if (request->command == "land") {
         land();
 
@@ -513,11 +537,23 @@ void PX4OffboardManager::arm()
     if (!offboard_heartbeat_thread_run_flag_) {
         RCLCPP_INFO(get_logger(), "Starting offboard signal for arming...");
 
-        // Initialize target setpoints to current position (hold position)
+        // Wait for fresh position data — prevents stale targets from previous flights
+        {
+            auto start = std::chrono::steady_clock::now();
+            while (!position_fresh_) {
+                if (std::chrono::steady_clock::now() - start > std::chrono::seconds(3)) {
+                    RCLCPP_WARN(get_logger(), "No fresh position data after 3s for arm");
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+        }
+
+        // Initialize target setpoints to current (fresh) position
         target_x_ = x_;
         target_y_ = y_;
         target_z_ = z_;
-        target_heading_ = heading_;
+        target_heading_ = NAN;  // Don't command a specific heading
 
         // Reset to position mode
         control_mode_ = ControlMode::POSITION;
@@ -581,31 +617,125 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
         enableOffboardMode();
     }
 
-    // Wait for valid heading data (up to 2 seconds)
-    // Heading of exactly 0.0 likely means we haven't received position data yet
-    auto start_time = std::chrono::steady_clock::now();
-    while (heading_ == 0.0 && x_ == 0.0 && y_ == 0.0 && z_ == 0.0) {
-        auto elapsed = std::chrono::steady_clock::now() - start_time;
-        if (elapsed > std::chrono::seconds(2)) {
-            RCLCPP_WARN(get_logger(), "No valid position/heading received after 2s, using current values");
-            break;
+    // Wait for fresh position data (up to 2 seconds)
+    {
+        auto start_time = std::chrono::steady_clock::now();
+        while (!position_fresh_) {
+            auto elapsed = std::chrono::steady_clock::now() - start_time;
+            if (elapsed > std::chrono::seconds(2)) {
+                RCLCPP_WARN(get_logger(), "No fresh position data after 2s, using current values");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    // Set target altitude setpoint (negative Z is up in NED frame)
+    // Set target to current (fresh) position + desired climb
     target_z_ = z_ - altitude;  // Current altitude minus desired climb
     target_x_ = x_;             // Hold current X position
     target_y_ = y_;             // Hold current Y position
-    target_heading_ = heading_; // Hold current heading
+    target_heading_ = NAN;      // Hold current heading — EKF heading unreliable on ground without GPS
     target_active_ = true;      // Mark target as active
 
-    RCLCPP_INFO(get_logger(), "Offboard takeoff setpoint: target_z=%.2f (climb %.2f meters), heading=%.2f rad",
-                target_z_, altitude, target_heading_);
+    RCLCPP_INFO(get_logger(), "Offboard takeoff: target=(%.2f, %.2f, %.2f) climb=%.2f heading=nan",
+                target_x_, target_y_, target_z_, altitude);
+}
+
+void PX4OffboardManager::velocityTakeoff(float altitude)
+{
+    // Flow-only friendly takeoff (mirrors the working MAVSDK takeoff_and_land.py):
+    // climb on a VELOCITY setpoint — needs no ground position estimate, since the
+    // optical flow measures velocity directly as the drone leaves the ground — then
+    // capture position and switch to POSITION hold once airborne. Avoids the
+    // position-from-ground problem that makes offboardTakeoff struggle while the EKF
+    // is in CONST_POS on the ground.
+
+    // Safety clamps
+    float target_alt = altitude;          // metres to climb
+    if (target_alt < 0.3f) target_alt = 0.3f;
+    if (target_alt > 2.5f) target_alt = 2.5f;
+    const float climb_speed = 1.0f;   // m/s upward (matches MAVSDK takeoff_and_land.py; faster through the <8cm flow dead-zone)
+
+    RCLCPP_INFO(get_logger(), "Velocity takeoff: climb %.2f m at %.2f m/s (rangefinder-stopped)",
+                target_alt, climb_speed);
+
+    // Ensure heartbeat is streaming and offboard is engaged before commanding velocity
+    if (!offboard_heartbeat_thread_run_flag_) {
+        startOffboardHeartbeat();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    enableOffboardMode();
+
+    // Wait briefly for fresh position so the climb reference (z_start) is valid
+    {
+        auto start = std::chrono::steady_clock::now();
+        while (!position_fresh_) {
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(2)) {
+                RCLCPP_WARN(get_logger(), "No fresh position after 2s, using current z");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+
+    // Rangefinder-based stop (mirrors MAVSDK takeoff_and_land.py, which watched distance_sensor):
+    // climb until dist_bottom shows we've risen target_alt. We use dist_bottom's VALUE and ignore
+    // its "valid" flag (false on the ground) — the value tracks the real rangefinder even when the
+    // EKF z diverges. A generous time backstop caps the climb if the rangefinder reading is bad.
+    double dist_start;
+    { std::lock_guard<std::mutex> lock(state_mutex_); dist_start = dist_bottom_; }
+    const double time_backstop_s = static_cast<double>(target_alt) / static_cast<double>(climb_speed) + 3.0;
+
+    // Stop any previous velocity-takeoff monitor
+    velocity_takeoff_run_flag_ = false;
+    if (velocity_takeoff_thread_ && velocity_takeoff_thread_->joinable()) {
+        velocity_takeoff_thread_->join();
+    }
+
+    // Command upward velocity (NED down is positive, so up = negative vz)
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        vel_x_ned_ = 0.0;
+        vel_y_ned_ = 0.0;
+        vel_z_ned_ = -static_cast<double>(climb_speed);
+        vel_yawspeed_ = 0.0;
+        control_mode_ = ControlMode::VELOCITY;
+    }
+    target_active_.store(false);
+
+    // Monitor altitude in a background thread; stop + hold on target or timeout.
+    velocity_takeoff_run_flag_ = true;
+    velocity_takeoff_thread_ = std::make_unique<std::thread>(
+        [this, dist_start, time_backstop_s, target_alt]() {
+            auto start = std::chrono::steady_clock::now();
+            while (velocity_takeoff_run_flag_) {
+                double rng;
+                { std::lock_guard<std::mutex> lock(state_mutex_); rng = dist_bottom_; }
+                double climbed = rng - dist_start;   // rangefinder height gained
+                double elapsed = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - start).count();
+                if (climbed >= target_alt) {
+                    RCLCPP_INFO(get_logger(), "Velocity takeoff reached %.2f m (rangefinder) — holding", climbed);
+                    break;
+                }
+                if (elapsed >= time_backstop_s) {
+                    RCLCPP_WARN(get_logger(), "Velocity takeoff backstop at %.1fs (rangefinder %.2f m) — holding", elapsed, rng);
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            // Capture current position + switch to POSITION hold (unless cancelled, e.g. land)
+            if (velocity_takeoff_run_flag_) {
+                stopVelocity();
+            }
+            velocity_takeoff_run_flag_ = false;
+        });
 }
 
 void PX4OffboardManager::land()
 {
+    // Cancel any in-progress velocity takeoff so its monitor can't fight the landing
+    velocity_takeoff_run_flag_ = false;
     // Stop offboard heartbeat since we're switching to auto land mode
     stopOffboardHeartbeat();
 
@@ -667,11 +797,25 @@ void PX4OffboardManager::startOffboardHeartbeat()
 
     RCLCPP_INFO(get_logger(), "Starting offboard heartbeat");
 
-    // Initialize target setpoints to current position
+    // Wait for fresh position data — prevents using stale values from a previous flight
+    {
+        auto start = std::chrono::steady_clock::now();
+        while (!position_fresh_) {
+            if (std::chrono::steady_clock::now() - start > std::chrono::seconds(3)) {
+                RCLCPP_WARN(get_logger(), "No fresh position data after 3s, using current values");
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
+
+    // Initialize target setpoints to current (fresh) position
     target_x_ = x_;
     target_y_ = y_;
     target_z_ = z_;
     target_heading_ = heading_;
+    RCLCPP_INFO(get_logger(), "Initial hold target: (%.2f, %.2f, %.2f) heading=%.1f°",
+                target_x_, target_y_, target_z_, target_heading_ * 180.0 / M_PI);
 
     // Reset to position mode
     control_mode_ = ControlMode::POSITION;
@@ -704,6 +848,15 @@ void PX4OffboardManager::stopOffboardHeartbeat()
     offboard_heartbeat_thread_run_flag_ = false;
     if (offboard_heartbeat_thread_ && offboard_heartbeat_thread_->joinable()) {
         offboard_heartbeat_thread_->join();
+    }
+
+    // Invalidate position so the next start waits for fresh EKF data.
+    // Without this, stale x_/y_ from a previous flight persist and the
+    // drone flies to the old position on the next offboard takeoff.
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        position_fresh_ = false;
+        target_active_.store(false);
     }
 }
 
@@ -757,9 +910,13 @@ void PX4OffboardManager::sendOffboardHeartbeat()
 // Velocity control methods
 void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw_rate_deg)
 {
-    // If all inputs are near zero, stop velocity mode
+    // All-zero input only means "stop" if we are currently in velocity mode.
+    // A phantom zero from a stale frontend loop must not clobber an active
+    // position target (e.g. an in-progress takeoff).
     if (std::abs(vx) < 0.01f && std::abs(vy) < 0.01f && std::abs(vz) < 0.01f && std::abs(yaw_rate_deg) < 0.1f) {
-        stopVelocity();
+        if (control_mode_ == ControlMode::VELOCITY) {
+            stopVelocity();
+        }
         return;
     }
 
@@ -798,7 +955,11 @@ void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw
 
 void PX4OffboardManager::stopVelocity()
 {
-    // Capture current position as hold target
+    // Flow-safe hold: keep VELOCITY control at zero rather than capturing an absolute
+    // POSITION target. On a flow-only drone the integrated horizontal position drifts
+    // (flow measures velocity, not position; no absolute reference), so a position hold
+    // chases a phantom and flies away. Commanding velocity = 0 keeps it roughly in place
+    // using the flow's native, far more stable velocity estimate.
     std::lock_guard<std::mutex> lock(state_mutex_);
     target_x_ = x_;
     target_y_ = y_;
@@ -808,11 +969,10 @@ void PX4OffboardManager::stopVelocity()
     vel_y_ned_ = 0.0;
     vel_z_ned_ = 0.0;
     vel_yawspeed_ = 0.0;
-    control_mode_ = ControlMode::POSITION;
+    control_mode_ = ControlMode::VELOCITY;  // hold zero velocity, NOT absolute position
     target_active_.store(false);
 
-    RCLCPP_INFO(get_logger(), "Velocity stopped - position hold at (%.2f, %.2f, %.2f) heading %.2f°",
-                target_x_, target_y_, target_z_, target_heading_ * 180.0 / M_PI);
+    RCLCPP_INFO(get_logger(), "Velocity stopped - holding zero velocity (flow-safe hover) at z=%.2f", z_);
 }
 
 void PX4OffboardManager::sendTrajectorySetpointVelocity(float vx, float vy, float vz, float yawspeed)
