@@ -105,7 +105,9 @@ class TagHop(Node):
         for command, tag, t, ned in steps:
             ok, message = self.call(self.tag_nav, command, tag, t, **ned)
             if not ok:
-                return self.fail(f'{command} {tag}: {message}', land=self.mission_has_aircraft())
+                # From the ground there is no pilot: always land. After a hand-off, land
+                # only while the mission still has the aircraft.
+                return self.fail(f'{command} {tag}: {message}', land=bool(takeoff_alt) or self.mission_has_aircraft())
 
         ok, _ = self.call(self.manager, 'land', 0, 40)
         return 0 if ok else 1
