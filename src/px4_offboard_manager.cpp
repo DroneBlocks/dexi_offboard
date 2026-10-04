@@ -858,6 +858,9 @@ void PX4OffboardManager::stopOffboardHeartbeat()
     }
 }
 
+// Setpoint depth below the aircraft while it sits on the ground (meters, NED +down).
+static constexpr double GROUND_HOLD_BELOW_M = 0.5;
+
 void PX4OffboardManager::sendOffboardHeartbeat()
 {
     const std::chrono::milliseconds sleep_duration(50);  // 20Hz
@@ -886,6 +889,15 @@ void PX4OffboardManager::sendOffboardHeartbeat()
             ty = target_y_;
             tz = target_z_;
             th = target_heading_;
+            // On the ground with nothing commanded (armed and holding, or waiting for
+            // a hand-off), a hold at the current height makes PX4 spool up and call it
+            // a takeoff, after which it refuses to disarm ("not landed"). Ask for a
+            // point below the floor instead: PX4 keeps idle thrust and stays landed
+            // until a takeoff or hold target is set.
+            if (mode == ControlMode::POSITION && landed_.load() &&
+                !target_active_.load() && !hold_exact_.load()) {
+                tz = z_ + GROUND_HOLD_BELOW_M;
+            }
             vx = vel_x_ned_;
             vy = vel_y_ned_;
             vz = vel_z_ned_;
