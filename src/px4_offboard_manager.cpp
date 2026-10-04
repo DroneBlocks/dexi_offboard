@@ -740,12 +740,10 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    // Set target altitude setpoint (negative Z is up in NED frame)
-    target_z_ = z_ - altitude;  // Current altitude minus desired climb
-    target_x_ = x_;             // Hold current X position
-    target_y_ = y_;             // Hold current Y position
-    target_heading_ = heading_; // Hold current heading
-    target_active_ = true;      // Mark target as active
+    // Set target altitude setpoint (negative Z is up in NED frame). Go through setTarget
+    // so a hold_ned left by the previous mission is dropped: with hold_exact_ still set,
+    // arrival is never evaluated and the takeoff climbs but times out.
+    setTarget(x_, y_, z_ - altitude, heading_);
 
     RCLCPP_INFO(get_logger(), "Offboard takeoff setpoint: target_z=%.2f (climb %.2f meters), heading=%.2f rad",
                 target_z_, altitude, target_heading_);
@@ -753,6 +751,10 @@ void PX4OffboardManager::offboardTakeoff(float altitude)
 
 void PX4OffboardManager::land()
 {
+    // A landing ends whatever target or exact hold was active; nothing may survive it
+    // into the next flight.
+    target_active_.store(false);
+    hold_exact_.store(false);
     // Stop offboard heartbeat since we're switching to auto land mode
     stopOffboardHeartbeat();
 
