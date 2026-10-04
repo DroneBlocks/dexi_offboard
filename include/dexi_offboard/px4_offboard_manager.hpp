@@ -12,6 +12,7 @@
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
 #include <dexi_interfaces/srv/execute_blockly_command.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -54,6 +55,14 @@ private:
     // Timer
     rclcpp::TimerBase::SharedPtr frame_timer_;
     rclcpp::TimerBase::SharedPtr offboard_timer_; 
+    rclcpp::TimerBase::SharedPtr status_timer_;
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_publisher_;
+    // 20 Hz echo of PX4's 100 Hz local position for Python consumers (tag_nav): every message
+    // wakes rclpy's wait-set rebuild, which cost 83% of a CM4 core at 100 Hz and 28% at 20 Hz.
+    rclcpp::Publisher<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_pos_20hz_publisher_;
+    rclcpp::TimerBase::SharedPtr local_pos_20hz_timer_;
+    px4_msgs::msg::VehicleLocalPosition last_local_pos_;
+    bool have_local_pos_{false};
 
     // State variables
     std::shared_ptr<px4_msgs::msg::VehicleStatus> prev_vehicle_status_msg_;
@@ -75,6 +84,14 @@ private:
 
     // Target reached detection
     std::atomic<bool> target_active_{false};
+    // hold_ned: keep the exact position setpoint; never "reach" it and re-latch at the
+    // current position the way goto_ned does. Cleared by any other mode change.
+    std::atomic<bool> hold_exact_{false};
+    // start_setpoint_stream: run the heartbeat without commanding OFFBOARD, so a
+    // pilot can switch to it from the RC (PX4 only accepts the switch while
+    // setpoints are already arriving). start_offboard_heartbeat sets it back.
+    std::atomic<bool> auto_offboard_{true};
+    std::atomic<bool> in_offboard_{false};
 
     // Mutex for thread-safe access to position/heading state
     mutable std::mutex state_mutex_;
@@ -135,6 +152,8 @@ private:
     void yawLeft(float angle);
     void yawRight(float angle);
     void gotoNED(float north, float east, float down, float yaw);
+    void holdNED(float north, float east, float down, float yaw);
+    void publishStatus();
     void setGotoNEDParams(float north, float east, float down, float yaw);
 
     // Velocity control methods
