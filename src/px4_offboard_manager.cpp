@@ -8,8 +8,7 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
     // Note: keyboard_control_enabled is read by the GUI to show/hide keyboard control option
     this->declare_parameter("keyboard_control_enabled", false);
     keyboard_control_enabled_ = this->get_parameter("keyboard_control_enabled").as_bool();
-    // Arrival tolerances for goto-style commands. Were hardcoded; tag navigation
-    // needs them visible and, for hold_ned, irrelevant.
+    // Arrival tolerances for goto-style commands (hold_ned never evaluates arrival).
     this->declare_parameter("position_tolerance", position_tolerance_);
     this->declare_parameter("heading_tolerance", heading_tolerance_);
     position_tolerance_ = this->get_parameter("position_tolerance").as_double();
@@ -162,7 +161,7 @@ void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatu
     armed_.store(msg->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED);
     // "In offboard" for the hand-off latch means armed AND in OFFBOARD: PX4 stays in
     // OFFBOARD after landing and disarming, and the EKF height can jump on the ground
-    // (SITL reset 3 m low at disarm), so a latch taken while disarmed holds garbage.
+    // (SITL resets it 3 m low at disarm), so a latch taken while disarmed holds garbage.
     const bool now_offboard = armed_.load() &&
         msg->nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
     if (now_offboard && !in_offboard_.load() && !auto_offboard_.load()) {
@@ -202,8 +201,8 @@ void PX4OffboardManager::vehicleStatusCallback(const px4_msgs::msg::VehicleStatu
             } else {
                 // Stream-only hand-off: keep streaming so the pilot can re-enter
                 // Offboard later; the setpoint follows the aircraft again meanwhile.
-                // (Also fires on the native takeoff after a flight that ended in
-                // Offboard, which used to kill the stream before the hand-off.)
+                // This also fires on a native takeoff after a flight that ended in
+                // Offboard, so the stream must survive it.
                 RCLCPP_INFO(get_logger(),
                             "Left offboard mode (nav_state %u) - stream follows aircraft",
                             msg->nav_state);
