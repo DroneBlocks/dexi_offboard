@@ -7,7 +7,7 @@ from the aircraft itself, and calls the same two services the blocks and the
 Node-RED flow use.
 
     python3 apriltag_tag_hop_rosbridge.py --host ros2-dev --route 0 2 4 --takeoff 1.3
-    python3 apriltag_tag_hop_rosbridge.py --host 192.168.68.61 --route 0 2 4      # pilot hand-off
+    python3 apriltag_tag_hop_rosbridge.py --host <aircraft-ip> --route 0 2 4      # pilot hand-off
 
 See apriltag_tag_hop.py for the mission rules (route order = direction, one
 mission owner at a time, never land under a pilot).
