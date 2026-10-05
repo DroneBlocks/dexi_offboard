@@ -124,7 +124,7 @@ class TagHop(Node):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--route', type=int, nargs='+', default=[0, 1, 2, 3, 4, 5], help='tag ids in flight order')
+    p.add_argument('--route', type=int, nargs='+', default=[0, 1, 2, 3, 4], help='tag ids in flight order')
     p.add_argument('--speed', type=float, default=0.25, help='transit speed, m/s')
     p.add_argument('--takeoff', type=float, default=0.0, metavar='ALT', help='start from the ground at this altitude (m) instead of a pilot hand-off')
     p.add_argument('--timeout-center', type=float, default=25.0)

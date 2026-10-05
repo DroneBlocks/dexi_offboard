@@ -100,7 +100,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--host', default='localhost', help='rosbridge host (ros2-dev in the sim stack, the aircraft IP in the lab)')
     p.add_argument('--port', type=int, default=9090)
-    p.add_argument('--route', type=int, nargs='+', default=[0, 1, 2, 3, 4, 5])
+    p.add_argument('--route', type=int, nargs='+', default=[0, 1, 2, 3, 4])
     p.add_argument('--speed', type=float, default=0.25)
     p.add_argument('--takeoff', type=float, default=0.0, metavar='ALT')
     p.add_argument('--timeout-center', type=float, default=25.0)
