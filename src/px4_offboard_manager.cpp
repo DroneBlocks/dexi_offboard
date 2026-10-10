@@ -497,16 +497,12 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         RCLCPP_INFO(get_logger(), "Waiting for landing to complete...");
 
         while (rclcpp::ok()) {
-            // Check both PX4's land detector AND altitude as fallback
-            // This ensures landing detection works in both real hardware and simulation
-            bool altitude_landed = std::abs(z_) < 0.5;
-
-            if (landed_ || altitude_landed) {
-                if (landed_) {
-                    RCLCPP_INFO(get_logger(), "Landing confirmed by PX4 land detector at z=%.2f", z_);
-                } else {
-                    RCLCPP_INFO(get_logger(), "Landing confirmed by altitude check at z=%.2f", z_);
-                }
+            // Done only when PX4 says the vehicle is on the ground. An altitude check
+            // fires in the air: z is relative to the EKF origin, not the floor, and
+            // a disarm sent before touchdown is rejected.
+            if (landed_ || !armed_) {
+                RCLCPP_INFO(get_logger(), "Landing confirmed by PX4 (landed=%s armed=%s) at z=%.2f",
+                    landed_.load() ? "true" : "false", armed_.load() ? "true" : "false", z_);
 
                 // Brief delay to ensure stable on ground
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
