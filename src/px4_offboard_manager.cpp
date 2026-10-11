@@ -261,7 +261,10 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
     if (target_active_.load() && !hold_exact_.load() && isTargetReached()) {
         RCLCPP_INFO(get_logger(), "Target reached! Position: (%.2f, %.2f, %.2f), Heading: %.2f°",
                    x_, y_, z_, heading_ * 180.0 / M_PI);
-        clearTarget();
+        // "Reached" means inside the tolerance, not on the point. Keep holding the
+        // commanded point; re-latching where the vehicle is now would leave a
+        // takeoff up to a tolerance short of its height.
+        target_active_.store(false);
     }
 }
 
@@ -422,6 +425,23 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         command_has_target = false;  // Immediate command
     } else if (request->command == "disarm") {
         disarm();
+        // PX4 refuses to disarm in the air, so confirm it instead of reporting
+        // success for a command that was denied.
+        {
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (armed_.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (armed_.load()) {
+                response->success = false;
+                response->message = "Disarm rejected by PX4 (still armed after 3s; not landed?)";
+                response->execution_time =
+                    std::chrono::duration<float>(std::chrono::steady_clock::now() - start_time).count();
+                RCLCPP_ERROR(get_logger(), "%s", response->message.c_str());
+                return;
+            }
+            RCLCPP_INFO(get_logger(), "Disarm confirmed");
+        }
         command_has_target = false;  // Immediate command
     } else if (request->command == "start_setpoint_stream") {
         auto_offboard_.store(false);
@@ -497,16 +517,12 @@ void PX4OffboardManager::executeBlocklyCommandCallback(
         RCLCPP_INFO(get_logger(), "Waiting for landing to complete...");
 
         while (rclcpp::ok()) {
-            // Check both PX4's land detector AND altitude as fallback
-            // This ensures landing detection works in both real hardware and simulation
-            bool altitude_landed = std::abs(z_) < 0.5;
-
-            if (landed_ || altitude_landed) {
-                if (landed_) {
-                    RCLCPP_INFO(get_logger(), "Landing confirmed by PX4 land detector at z=%.2f", z_);
-                } else {
-                    RCLCPP_INFO(get_logger(), "Landing confirmed by altitude check at z=%.2f", z_);
-                }
+            // Done only when PX4 says the vehicle is on the ground. An altitude check
+            // fires in the air: z is relative to the EKF origin, not the floor, and
+            // a disarm sent before touchdown is rejected.
+            if (landed_ || !armed_) {
+                RCLCPP_INFO(get_logger(), "Landing confirmed by PX4 (landed=%s armed=%s) at z=%.2f",
+                    landed_.load() ? "true" : "false", armed_.load() ? "true" : "false", z_);
 
                 // Brief delay to ensure stable on ground
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
