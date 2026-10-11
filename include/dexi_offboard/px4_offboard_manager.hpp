@@ -11,6 +11,7 @@
 #include <px4_msgs/msg/vehicle_land_detected.hpp>
 #include <dexi_interfaces/msg/offboard_nav_command.hpp>
 #include <dexi_interfaces/srv/execute_blockly_command.hpp>
+#include <dexi_interfaces/srv/flight_command.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <thread>
@@ -48,6 +49,7 @@ private:
 
     // ROS services
     rclcpp::Service<dexi_interfaces::srv::ExecuteBlocklyCommand>::SharedPtr blockly_command_service_;
+    rclcpp::Service<dexi_interfaces::srv::FlightCommand>::SharedPtr flight_command_service_;
 
     // Callback groups for concurrent execution
     rclcpp::CallbackGroup::SharedPtr service_callback_group_;
@@ -130,6 +132,9 @@ private:
     void executeBlocklyCommandCallback(
         const std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Request> request,
         std::shared_ptr<dexi_interfaces::srv::ExecuteBlocklyCommand::Response> response);
+    void flightCommandCallback(
+        const std::shared_ptr<dexi_interfaces::srv::FlightCommand::Request> request,
+        std::shared_ptr<dexi_interfaces::srv::FlightCommand::Response> response);
     void execFrame();
 
     // Command methods
