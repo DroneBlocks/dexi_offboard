@@ -51,6 +51,31 @@ ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavComm
 ros2 topic pub --once /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand "{command: 'stop_offboard_heartbeat'}"
 ```
 
+### Or one step at a time, waiting for each
+
+The same commands are a service on `/dexi/flight/command` (`dexi_interfaces/srv/FlightCommand`). Each call returns when the step is done, with `success` and a `message`:
+
+```bash
+ros2 service call /dexi/flight/command dexi_interfaces/srv/FlightCommand "{command: 'arm'}"
+ros2 service call /dexi/flight/command dexi_interfaces/srv/FlightCommand "{command: 'offboard_takeoff', value: 1.5, timeout: 30.0}"
+ros2 service call /dexi/flight/command dexi_interfaces/srv/FlightCommand "{command: 'land', timeout: 30.0}"
+ros2 service call /dexi/flight/command dexi_interfaces/srv/FlightCommand "{command: 'disarm'}"
+```
+
+`/dexi/execute_blockly_command` (`ExecuteBlocklyCommand`, with `parameter` in place of `value`) is the old name for the same service. It still works and will be removed in a later release.
+
+## Topic or service?
+
+Use a service when you need to know it finished. Use a topic when you're streaming something many times a second, or just listening.
+
+| Use | For | Example |
+|---|---|---|
+| Service `/dexi/flight/command` | A step with an outcome: arm, takeoff, fly forward, goto, land, disarm | `simple_flight.py`, `position_square.py` |
+| Topic (publish) | A setpoint stream many times a second | the 20 Hz pattern in `position_circle_orbit.py` |
+| Topic (subscribe) | Reading data: position, telemetry, tag detections | `/fmu/out/vehicle_local_position` in `position_circle_orbit.py` |
+
+`examples/python/position_circle_orbit.py` uses both: the service for arm, takeoff, land and disarm, and a topic for the orbit itself.
+
 ## Available Commands
 
 ### Flight Control
@@ -245,10 +270,18 @@ ros2 run dexi_offboard keyboard_teleop
 
 ## Usage with Python and Node-RED
 
-See the `examples/` directory for:
-- Python scripts for programmatic control
-- Node-RED flow examples
-- Integration examples with other ROS2 nodes
+See `examples/python/`. Every example sends its steps to `/dexi/flight/command` and stops if a step fails:
+
+| Example | What it flies |
+|---|---|
+| `simple_flight.py` | Arm, take off, hold, land |
+| `droneblocks_box_mission.py` | A 1 m box, one command after another |
+| `droneblocks_circle_mission.py` | A smooth 1 m circle with one command |
+| `position_square.py` | A 1 m square, then a full turn |
+| `position_circle_orbit.py` | An orbit streamed at 20 Hz (service + topic) |
+| `position_figure_eight.py` | A figure eight streamed at 20 Hz (service + topic) |
+| `velocity_circle.py`, `velocity_figure_eight.py` | Shapes from a forward speed and a yaw rate |
+| `velocity_control_demo.py` | Each velocity command in turn |
 
 ## Safety Notes
 

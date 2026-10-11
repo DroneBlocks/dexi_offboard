@@ -4,158 +4,143 @@ DEXI square flight pattern example
 
 This example demonstrates more complex flight patterns using the DEXI offboard manager.
 The drone will:
-1. Arm and takeoff using offboard mode
+1. Arm and take off using offboard mode
 2. Fly a square pattern (forward, right, backward, left)
 3. Perform a 360-degree rotation
 4. Land and disarm
 
+Steps go to the /dexi/flight/command service, so each call waits until the
+step is done and stops the script if it fails.
+    Use a service when you need to know it finished. Use a topic when you're
+    streaming something many times a second, or just listening.
+
 Usage:
-    python3 square_pattern.py
+    python3 position_square.py
 
 Requirements:
     - ROS2 environment sourced
     - dexi_offboard node running
     - dexi_interfaces package available
-
-Note:
-    This script uses 'offboard_takeoff' to maintain offboard mode throughout the flight,
-    ensuring all movement commands (fly_forward, fly_right, etc.) work correctly.
 """
+
+import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from dexi_interfaces.msg import OffboardNavCommand
-import time
+from rclpy.signals import SignalHandlerOptions
+from dexi_interfaces.srv import FlightCommand
 
 
 class SquarePatternFlight(Node):
     def __init__(self):
         super().__init__('square_pattern_flight')
 
-        # Configure QoS to match offboard manager
-        qos_profile = QoSProfile(
-            reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        # Create publisher for offboard commands
-        self.cmd_publisher = self.create_publisher(
-            OffboardNavCommand,
-            '/dexi/offboard_manager',
-            qos_profile
-        )
-
         # Flight parameters
         self.takeoff_altitude = 1.5  # meters
         self.square_size = 1.0       # meters per side
-        self.move_wait_time = 5.0    # seconds to wait between moves
 
-        # Wait for publisher to be ready
-        time.sleep(1)
+        self.flight_client = self.create_client(FlightCommand, '/dexi/flight/command')
+        if not self.flight_client.wait_for_service(timeout_sec=10.0):
+            raise RuntimeError('/dexi/flight/command is not available; is the offboard manager running?')
+        self.flying = False
         self.get_logger().info("Square pattern flight example initialized")
 
-    def send_command(self, command, distance_or_degrees=0.0, wait_time=2.0):
-        """Send a command to the offboard manager and wait"""
-        msg = OffboardNavCommand()
-        msg.command = command
-        msg.distance_or_degrees = distance_or_degrees
+    def flight(self, command, value=0.0, timeout=30.0, north=0.0, east=0.0, down=0.0, yaw=0.0, check=True):
+        """Run one step on /dexi/flight/command and wait until it is done.
 
-        self.cmd_publisher.publish(msg)
-        self.get_logger().info(f"Command: {command} (value: {distance_or_degrees})")
+        Raises RuntimeError if the step fails, unless check=False (used while
+        cleaning up, where a failure should not stop the rest of the cleanup).
+        """
+        request = FlightCommand.Request()
+        request.command = command
+        request.value = float(value)
+        request.north = float(north)
+        request.east = float(east)
+        request.down = float(down)
+        request.yaw = float(yaw)
+        request.timeout = float(timeout)
 
-        # Wait for command to process
-        time.sleep(wait_time)
+        if command == 'offboard_takeoff':
+            self.flying = True   # set before the call: a failed takeoff may still leave the ground
+        future = self.flight_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+        result = future.result()
+
+        if result is None or not result.success:
+            message = result.message if result is not None else 'no response'
+            self.get_logger().error(f"{command}: FAILED ({message})")
+            if check:
+                raise RuntimeError(f"{command} failed: {message}")
+            return False
+
+        shown = f" {value:g}" if value else ""
+        self.get_logger().info(f"{command}{shown}: {result.message} ({result.execution_time:.1f} s)")
+        if command == 'land':
+            self.flying = False
+        return True
+
+    def emergency_land(self):
+        """Land if the drone is in the air, then disarm. Never raises."""
+        self.get_logger().warn("Emergency landing...")
+        if self.flying:
+            self.flight("land", timeout=60.0, check=False)
+        self.flight("disarm", check=False)
 
     def execute_square_pattern(self):
         """Execute the complete square pattern flight"""
         try:
             self.get_logger().info("Starting square pattern flight...")
 
-            # 1. Initialize offboard mode
-            self.get_logger().info("Initializing offboard mode...")
-            self.send_command("start_offboard_heartbeat", wait_time=3.0)
-            self.send_command("arm", wait_time=3.0)
-
-            # 2. Takeoff using offboard mode
+            # 1. Arm and take off in offboard mode
+            self.flight("arm")
             self.get_logger().info(f"Taking off to {self.takeoff_altitude} meters (offboard mode)")
-            self.send_command("offboard_takeoff", distance_or_degrees=self.takeoff_altitude, wait_time=8.0)
+            self.flight("offboard_takeoff", self.takeoff_altitude)
 
-            # 3. Stabilize after takeoff
-            self.get_logger().info("Stabilizing position...")
-            time.sleep(3.0)
-
-            # 4. Fly square pattern
+            # 2. Fly the square. Each side returns once the drone reaches its corner.
             self.get_logger().info(f"Flying square pattern ({self.square_size}m sides)")
 
-            # Side 1: Forward
             self.get_logger().info("Side 1: Flying forward")
-            self.send_command("fly_forward", distance_or_degrees=self.square_size, wait_time=self.move_wait_time)
+            self.flight("fly_forward", self.square_size)
 
-            # Side 2: Right
             self.get_logger().info("Side 2: Flying right")
-            self.send_command("fly_right", distance_or_degrees=self.square_size, wait_time=self.move_wait_time)
+            self.flight("fly_right", self.square_size)
 
-            # Side 3: Backward
             self.get_logger().info("Side 3: Flying backward")
-            self.send_command("fly_backward", distance_or_degrees=self.square_size, wait_time=self.move_wait_time)
+            self.flight("fly_backward", self.square_size)
 
-            # Side 4: Left (return to start)
             self.get_logger().info("Side 4: Flying left (returning to start)")
-            self.send_command("fly_left", distance_or_degrees=self.square_size, wait_time=self.move_wait_time)
+            self.flight("fly_left", self.square_size)
 
-            # 5. Optional: Add some rotations
+            # 3. Turn a full circle in four quarter turns
             self.get_logger().info("Adding 360-degree rotation")
-            self.send_command("yaw_right", distance_or_degrees=90.0, wait_time=3.0)
-            self.send_command("yaw_right", distance_or_degrees=90.0, wait_time=3.0)
-            self.send_command("yaw_right", distance_or_degrees=90.0, wait_time=3.0)
-            self.send_command("yaw_right", distance_or_degrees=90.0, wait_time=3.0)
+            for _ in range(4):
+                self.flight("yaw_right", 90.0)
 
-            # 6. Hold final position
-            self.get_logger().info("Holding final position...")
-            time.sleep(3.0)
-
-            # 7. Land and shutdown
+            # 4. Land and disarm
             self.get_logger().info("Landing...")
-            self.send_command("land", wait_time=8.0)
-            self.send_command("disarm", wait_time=2.0)
-            self.send_command("stop_offboard_heartbeat", wait_time=1.0)
+            self.flight("land", timeout=60.0)
+            self.flight("disarm")
 
             self.get_logger().info("Square pattern flight completed successfully!")
 
-        except Exception as e:
-            self.get_logger().error(f"Square pattern flight failed: {str(e)}")
-            self._emergency_land()
-
-    def _emergency_land(self):
-        """Emergency landing procedure"""
-        self.get_logger().warn("Executing emergency landing procedure...")
-        try:
-            self.send_command("land", wait_time=2.0)
-            time.sleep(5)
-            self.send_command("disarm", wait_time=1.0)
-            self.send_command("stop_offboard_heartbeat", wait_time=1.0)
-        except Exception as e:
-            self.get_logger().error(f"Emergency landing failed: {str(e)}")
+        except RuntimeError as e:
+            self.get_logger().error(f"Square pattern flight failed: {e}")
+            self.emergency_land()
 
 
 def main(args=None):
-    rclpy.init(args=args)
-
-    flight_controller = SquarePatternFlight()
+    # Ctrl+C raises KeyboardInterrupt instead of shutting ROS down, so the
+    # emergency landing below can still call the service.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    node = SquarePatternFlight()
 
     try:
-        # Execute the square pattern flight
-        flight_controller.execute_square_pattern()
-
+        node.execute_square_pattern()
     except KeyboardInterrupt:
-        flight_controller.get_logger().info("Flight interrupted by user")
-        flight_controller._emergency_land()
-
+        node.get_logger().info("Interrupted by user")
+        node.emergency_land()
     finally:
-        flight_controller.destroy_node()
+        node.destroy_node()
         rclpy.shutdown()
 
 
