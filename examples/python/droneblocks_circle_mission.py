@@ -1,131 +1,128 @@
 #!/usr/bin/env python3
 """
-DroneBlocks Circle Mission Example using ExecuteBlocklyCommand Service
+DroneBlocks Circle Mission Example using the FlightCommand service
 
 This example demonstrates how to fly in a smooth circle pattern:
 1. Arm the drone
-2. Takeoff to 1.5 meters
-3. Switch to offboard mode
-4. Fly in a circle with specified radius (smooth trajectory at 20Hz)
-5. Land and disarm
+2. Take off to 1.5 meters
+3. Fly in a circle with specified radius (smooth trajectory at 20Hz)
+4. Land and disarm
 
-The circle is flown using continuous trajectory setpoints for smooth,
-professional-looking circular motion (not discrete waypoints).
-Takes approximately 15 seconds to complete one full circle.
+The circle is flown by the offboard manager using continuous trajectory
+setpoints for smooth circular motion (not discrete waypoints).
+
+Steps go to the /dexi/flight/command service, so each call waits until the
+step is done and stops the script if it fails.
+    Use a service when you need to know it finished. Use a topic when you're
+    streaming something many times a second, or just listening.
 """
+
+import math
 
 import rclpy
 from rclpy.node import Node
-from dexi_interfaces.srv import ExecuteBlocklyCommand
+from rclpy.signals import SignalHandlerOptions
+from dexi_interfaces.srv import FlightCommand
+
+RADIUS = 1.0  # meters; change the circle size here
 
 
 class DroneBlocksCircleMissionClient(Node):
     def __init__(self):
         super().__init__('droneblocks_circle_mission_client')
+        self.flight_client = self.create_client(FlightCommand, '/dexi/flight/command')
+        if not self.flight_client.wait_for_service(timeout_sec=10.0):
+            raise RuntimeError('/dexi/flight/command is not available; is the offboard manager running?')
+        self.flying = False
+        self.get_logger().info('Service available! Starting mission...')
 
-        # Create service client
-        self.client = self.create_client(
-            ExecuteBlocklyCommand,
-            '/dexi/execute_blockly_command'
-        )
+    def flight(self, command, value=0.0, timeout=30.0, north=0.0, east=0.0, down=0.0, yaw=0.0, check=True):
+        """Run one step on /dexi/flight/command and wait until it is done.
 
-        # Wait for service to be available
-        while not self.client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info('Waiting for execute_blockly_command service...')
-
-        self.get_logger().info('Service available! Starting circle mission...')
-
-    def execute_command(self, command, parameter=0.0, timeout=60.0):
-        """Execute a single command and wait for completion"""
-        request = ExecuteBlocklyCommand.Request()
+        Raises RuntimeError if the step fails, unless check=False (used while
+        cleaning up, where a failure should not stop the rest of the cleanup).
+        """
+        request = FlightCommand.Request()
         request.command = command
-        request.parameter = parameter
-        request.timeout = timeout
+        request.value = float(value)
+        request.north = float(north)
+        request.east = float(east)
+        request.down = float(down)
+        request.yaw = float(yaw)
+        request.timeout = float(timeout)
 
-        self.get_logger().info(f'Sending command: {command} (param: {parameter})')
-
-        # Call service and wait for response
-        future = self.client.call_async(request)
+        if command == 'offboard_takeoff':
+            self.flying = True   # set before the call: a failed takeoff may still leave the ground
+        future = self.flight_client.call_async(request)
         rclpy.spin_until_future_complete(self, future)
+        result = future.result()
 
-        response = future.result()
-
-        if response.success:
-            self.get_logger().info(
-                f'✓ {command} completed in {response.execution_time:.2f}s - {response.message}'
-            )
-        else:
-            self.get_logger().error(
-                f'✗ {command} FAILED: {response.message}'
-            )
-
-        return response.success
-
-    def run_circle_mission(self, radius=1.0):
-        """Execute complete circle mission"""
-        import time
-
-        # 1. Start offboard heartbeat (wait for PX4 to accept offboard mode)
-        if not self.execute_command('start_offboard_heartbeat'):
+        if result is None or not result.success:
+            message = result.message if result is not None else 'no response'
+            self.get_logger().error(f"{command}: FAILED ({message})")
+            if check:
+                raise RuntimeError(f"{command} failed: {message}")
             return False
 
-        time.sleep(3.0)
-
-        # 2. Arm the drone
-        if not self.execute_command('arm'):
-            return False
-
-        time.sleep(3.0)
-
-        # 3. Offboard takeoff to 1.5 meters (matches DroneBlocks GUI flow)
-        if not self.execute_command('offboard_takeoff', parameter=1.5, timeout=30.0):
-            return False
-
-        # 4. Fly in a circle
-        self.get_logger().info(f'Starting smooth circle flight with radius {radius}m...')
-
-        # Circle duration scales with radius (circumference / 1.0 m/s target speed)
-        # Add 50% margin for timeout: duration = 2*pi*radius / 1.0, timeout = duration * 1.5
-        import math
-        estimated_duration = (2.0 * math.pi * radius) / 1.0
-        timeout = estimated_duration * 1.5
-
-        self.get_logger().info(f'Estimated duration: {estimated_duration:.1f}s, timeout: {timeout:.1f}s')
-
-        if not self.execute_command('circle', parameter=radius, timeout=timeout):
-            return False
-
-        self.get_logger().info('Circle completed!')
-
-        # 5. Land (blocks until landing is complete)
-        if not self.execute_command('land', timeout=30.0):
-            return False
-
-        # 6. Disarm the drone
-        if not self.execute_command('disarm'):
-            return False
-
-        self.get_logger().info('Circle mission completed successfully!')
+        shown = f" {value:g}" if value else ""
+        self.get_logger().info(f"{command}{shown}: {result.message} ({result.execution_time:.1f} s)")
+        if command == 'land':
+            self.flying = False
         return True
+
+    def emergency_land(self):
+        """Land if the drone is in the air, then disarm. Never raises."""
+        self.get_logger().warn("Emergency landing...")
+        if self.flying:
+            self.flight("land", timeout=60.0, check=False)
+        self.flight("disarm", check=False)
+
+    def run_circle_mission(self, radius=RADIUS):
+        """Execute complete circle mission"""
+        try:
+            # 1. Arm the drone
+            self.flight('arm')
+
+            # 2. Offboard takeoff to 1.5 meters (matches DroneBlocks GUI flow)
+            self.flight('offboard_takeoff', 1.5)
+
+            # 3. Fly in a circle. The call returns when the circle is done.
+            # Duration scales with radius (circumference / 1.0 m/s target speed);
+            # the timeout adds 50% margin.
+            estimated_duration = (2.0 * math.pi * radius) / 1.0
+            timeout = estimated_duration * 1.5
+            self.get_logger().info(
+                f'Circle radius {radius}m, estimated {estimated_duration:.1f}s, timeout {timeout:.1f}s'
+            )
+            self.flight('circle', radius, timeout=timeout)
+            self.get_logger().info('Circle completed!')
+
+            # 4. Land (returns on touchdown) and disarm
+            self.flight('land', timeout=60.0)
+            self.flight('disarm')
+
+            self.get_logger().info('Circle mission completed successfully!')
+            return True
+
+        except RuntimeError as e:
+            self.get_logger().error(f'Mission failed: {e}')
+            self.emergency_land()
+            return False
 
 
 def main(args=None):
-    rclpy.init(args=args)
-
-    client = DroneBlocksCircleMissionClient()
+    # Ctrl+C raises KeyboardInterrupt instead of shutting ROS down, so the
+    # emergency landing below can still call the service.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    node = DroneBlocksCircleMissionClient()
 
     try:
-        # You can change the radius here (in meters)
-        # Default is 2.0 meters
-        radius = 1.0
-
-        success = client.run_circle_mission(radius=radius)
-        if not success:
-            client.get_logger().error('Mission failed!')
+        node.run_circle_mission()
     except KeyboardInterrupt:
-        client.get_logger().info('Mission interrupted by user')
+        node.get_logger().info("Interrupted by user")
+        node.emergency_land()
     finally:
-        client.destroy_node()
+        node.destroy_node()
         rclpy.shutdown()
 
 

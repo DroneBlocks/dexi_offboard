@@ -103,6 +103,16 @@ void PX4OffboardManager::initializeSubscribers()
 
 void PX4OffboardManager::initializeServices()
 {
+    // /dexi/flight/command is the interface. /dexi/execute_blockly_command is the
+    // old name, kept for existing scripts and lessons; both run the same code and,
+    // sharing one callback group, never run at the same time.
+    flight_command_service_ = create_service<dexi_interfaces::srv::FlightCommand>(
+        "flight/command",
+        std::bind(&PX4OffboardManager::flightCommandCallback, this,
+                  std::placeholders::_1, std::placeholders::_2),
+        rmw_qos_profile_services_default,
+        service_callback_group_);
+
     blockly_command_service_ = create_service<dexi_interfaces::srv::ExecuteBlocklyCommand>(
         "execute_blockly_command",
         std::bind(&PX4OffboardManager::executeBlocklyCommandCallback, this,
@@ -391,6 +401,25 @@ void PX4OffboardManager::handlePauseSetpoints(const std_msgs::msg::Bool::SharedP
 void PX4OffboardManager::vehicleLandDetectedCallback(const px4_msgs::msg::VehicleLandDetected::SharedPtr msg)
 {
     landed_ = msg->landed;
+}
+
+void PX4OffboardManager::flightCommandCallback(
+    const std::shared_ptr<dexi_interfaces::srv::FlightCommand::Request> request,
+    std::shared_ptr<dexi_interfaces::srv::FlightCommand::Response> response)
+{
+    auto legacy_request = std::make_shared<dexi_interfaces::srv::ExecuteBlocklyCommand::Request>();
+    legacy_request->command = request->command;
+    legacy_request->parameter = request->value;
+    legacy_request->north = request->north;
+    legacy_request->east = request->east;
+    legacy_request->down = request->down;
+    legacy_request->yaw = request->yaw;
+    legacy_request->timeout = request->timeout;
+    auto legacy_response = std::make_shared<dexi_interfaces::srv::ExecuteBlocklyCommand::Response>();
+    executeBlocklyCommandCallback(legacy_request, legacy_response);
+    response->success = legacy_response->success;
+    response->message = legacy_response->message;
+    response->execution_time = legacy_response->execution_time;
 }
 
 void PX4OffboardManager::executeBlocklyCommandCallback(

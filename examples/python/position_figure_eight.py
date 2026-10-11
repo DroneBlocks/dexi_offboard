@@ -17,6 +17,14 @@ The figure 8 is generated using parametric equations:
     y(t) = (A/2) * sin(2*t)
 where A is the size parameter and t goes from 0 to 2π
 
+Topic or service? This script uses both, on purpose:
+    - Steps (arm, takeoff, land, disarm) go to the /dexi/flight/command service,
+      so each call waits until the step is done and stops the script if it fails.
+    - The figure 8 itself is streamed on the /fmu/in/trajectory_setpoint topic at
+      20 Hz, because a setpoint stream has no "done" to wait for.
+    Use a service when you need to know it finished. Use a topic when you're
+    streaming something many times a second, or just listening.
+
 Usage:
     python3 figure_eight_pattern.py
 
@@ -29,7 +37,8 @@ Requirements:
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from dexi_interfaces.msg import OffboardNavCommand
+from rclpy.signals import SignalHandlerOptions
+from dexi_interfaces.srv import FlightCommand
 from px4_msgs.msg import TrajectorySetpoint, OffboardControlMode, VehicleLocalPosition
 import time
 import math
@@ -58,13 +67,13 @@ class FigureEightFlight(Node):
             depth=1
         )
 
-        # Create publishers
-        self.cmd_publisher = self.create_publisher(
-            OffboardNavCommand,
-            '/dexi/offboard_manager',
-            qos_profile
-        )
+        # Steps go to the offboard manager's service
+        self.flight_client = self.create_client(FlightCommand, '/dexi/flight/command')
+        if not self.flight_client.wait_for_service(timeout_sec=10.0):
+            raise RuntimeError('/dexi/flight/command is not available; is the offboard manager running?')
+        self.flying = False
 
+        # The pattern is streamed straight to PX4 on these topics
         self.trajectory_pub = self.create_publisher(
             TrajectorySetpoint,
             '/fmu/in/trajectory_setpoint',
@@ -87,6 +96,7 @@ class FigureEightFlight(Node):
 
         # Timer for trajectory updates
         self.trajectory_timer = None
+        self.last_setpoint = None
         self.t = 0.0  # Parameter for figure 8 trajectory
 
         # Wait for setup
@@ -103,20 +113,39 @@ class FigureEightFlight(Node):
             'heading': msg.heading
         }
 
-    def send_command(self, command, distance_or_degrees=0.0, wait_time=2.0):
-        """Send a command to the offboard manager and wait"""
-        msg = OffboardNavCommand()
-        msg.command = command
-        msg.distance_or_degrees = distance_or_degrees
+    def flight(self, command, value=0.0, timeout=30.0, north=0.0, east=0.0, down=0.0, yaw=0.0, check=True):
+        """Run one step on /dexi/flight/command and wait until it is done.
 
-        self.cmd_publisher.publish(msg)
-        self.get_logger().info(f"Command: {command} (value: {distance_or_degrees})")
+        Raises RuntimeError if the step fails, unless check=False (used while
+        cleaning up, where a failure should not stop the rest of the cleanup).
+        """
+        request = FlightCommand.Request()
+        request.command = command
+        request.value = float(value)
+        request.north = float(north)
+        request.east = float(east)
+        request.down = float(down)
+        request.yaw = float(yaw)
+        request.timeout = float(timeout)
 
-        # Spin during wait to keep receiving position updates
-        end_time = time.time() + wait_time
-        while time.time() < end_time:
-            rclpy.spin_once(self, timeout_sec=0.1)
-            time.sleep(0.05)  # Small sleep to prevent busy waiting
+        if command == 'offboard_takeoff':
+            self.flying = True   # set before the call: a failed takeoff may still leave the ground
+        future = self.flight_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future)
+        result = future.result()
+
+        if result is None or not result.success:
+            message = result.message if result is not None else 'no response'
+            self.get_logger().error(f"{command}: FAILED ({message})")
+            if check:
+                raise RuntimeError(f"{command} failed: {message}")
+            return False
+
+        shown = f" {value:g}" if value else ""
+        self.get_logger().info(f"{command}{shown}: {result.message} ({result.execution_time:.1f} s)")
+        if command == 'land':
+            self.flying = False
+        return True
 
     def publish_offboard_control_mode(self):
         """Publish offboard control mode to indicate we're sending position setpoints"""
@@ -172,6 +201,7 @@ class FigureEightFlight(Node):
         msg.yaw = float(yaw)
 
         self.trajectory_pub.publish(msg)
+        self.last_setpoint = (x, y, z, yaw)
 
     def trajectory_update(self):
         """Timer callback to update trajectory along figure 8"""
@@ -216,8 +246,7 @@ class FigureEightFlight(Node):
 
             # 1. Initialize offboard mode using the manager
             self.get_logger().info("Step 1: Initializing...")
-            self.send_command("start_offboard_heartbeat", wait_time=3.0)
-            self.send_command("arm", wait_time=3.0)
+            self.flight("arm")   # also starts the manager's offboard heartbeat
 
             # 2. Wait for position data before takeoff
             self.get_logger().info("Step 2: Waiting for position data...")
@@ -229,12 +258,12 @@ class FigureEightFlight(Node):
 
             if self.current_position is None:
                 self.get_logger().error("No position data received! Cannot start pattern.")
-                self._emergency_land()
+                self.flight("disarm", check=False)
                 return
 
             # 3. Takeoff using offboard mode
             self.get_logger().info(f"Step 3: Taking off to {self.takeoff_altitude} meters (offboard mode)")
-            self.send_command("offboard_takeoff", distance_or_degrees=self.takeoff_altitude, wait_time=10.0)
+            self.flight("offboard_takeoff", self.takeoff_altitude)
 
             # 4. Wait for position stabilization
             self.get_logger().info("Step 4: Waiting for position stabilization...")
@@ -250,7 +279,7 @@ class FigureEightFlight(Node):
 
             # 5. Stop offboard manager heartbeat to take full control
             self.get_logger().info("Step 5: Taking control - stopping offboard manager heartbeat...")
-            self.send_command("stop_offboard_heartbeat", wait_time=0.5)
+            self.flight("stop_offboard_heartbeat")
 
             # 6. Start figure 8 pattern with direct setpoint control
             self.get_logger().info("Step 6: Starting figure 8 pattern...")
@@ -283,42 +312,41 @@ class FigureEightFlight(Node):
             if self.trajectory_timer and not self.trajectory_timer.is_canceled():
                 self.trajectory_timer.cancel()
 
-            # Brief hold at current position
+            # Brief hold at the last point. Keep streaming it: PX4 leaves offboard
+            # mode if the setpoints stop.
             for _ in range(20):  # 2 seconds (20 * 100ms)
+                if self.last_setpoint is not None:
+                    self.publish_offboard_control_mode()
+                    self.publish_trajectory_setpoint(*self.last_setpoint)
                 rclpy.spin_once(self, timeout_sec=0.1)
 
             # 8. Land (this will automatically stop offboard mode)
             self.get_logger().info("Step 8: Landing...")
-            self.send_command("land", wait_time=10.0)
-            self.send_command("disarm", wait_time=2.0)
+            self.flight("land", timeout=60.0)   # returns on touchdown
+            self.flight("disarm")
             # No need to stop heartbeat - it was already stopped before the pattern
 
             self.get_logger().info("Figure 8 pattern flight completed successfully!")
 
-        except Exception as e:
+        except RuntimeError as e:
             self.get_logger().error(f"Figure 8 pattern flight failed: {str(e)}")
             self._emergency_land()
 
     def _emergency_land(self):
-        """Emergency landing procedure"""
+        """Stop the pattern, land if the drone is in the air, then disarm. Never raises."""
         self.get_logger().warn("Executing emergency landing procedure...")
-        try:
-            # Stop trajectory updates
-            self.pattern_started = False
-            if self.trajectory_timer and not self.trajectory_timer.is_canceled():
-                self.trajectory_timer.cancel()
-
-            self.send_command("land", wait_time=2.0)
-            for _ in range(80):  # 8 seconds (80 * 100ms)
-                rclpy.spin_once(self, timeout_sec=0.1)
-            self.send_command("disarm", wait_time=1.0)
-            # Heartbeat was already stopped before pattern started
-        except Exception as e:
-            self.get_logger().error(f"Emergency landing failed: {str(e)}")
+        self.pattern_started = False
+        if self.trajectory_timer and not self.trajectory_timer.is_canceled():
+            self.trajectory_timer.cancel()
+        if self.flying:
+            self.flight("land", timeout=60.0, check=False)
+        self.flight("disarm", check=False)
 
 
 def main(args=None):
-    rclpy.init(args=args)
+    # Ctrl+C raises KeyboardInterrupt instead of shutting ROS down, so the
+    # emergency landing below can still call the service.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
 
     flight_controller = FigureEightFlight()
 
