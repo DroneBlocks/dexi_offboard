@@ -40,8 +40,8 @@ class FigureEightFlight(Node):
         super().__init__('figure_eight_flight')
 
         # Flight parameters
-        self.takeoff_altitude = 3.0  # meters
-        self.figure8_size = 3.0      # meters (amplitude of the pattern)
+        self.takeoff_altitude = 1.5  # meters
+        self.figure8_size = 1.0      # meters (amplitude of the pattern)
         self.flight_speed = 0.5      # m/s (speed along the path)
         self.update_rate = 20.0      # Hz (trajectory update rate)
 

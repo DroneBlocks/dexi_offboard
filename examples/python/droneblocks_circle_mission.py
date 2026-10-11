@@ -4,7 +4,7 @@ DroneBlocks Circle Mission Example using ExecuteBlocklyCommand Service
 
 This example demonstrates how to fly in a smooth circle pattern:
 1. Arm the drone
-2. Takeoff to 3 meters
+2. Takeoff to 1.5 meters
 3. Switch to offboard mode
 4. Fly in a circle with specified radius (smooth trajectory at 20Hz)
 5. Land and disarm
@@ -61,7 +61,7 @@ class DroneBlocksCircleMissionClient(Node):
 
         return response.success
 
-    def run_circle_mission(self, radius=2.0):
+    def run_circle_mission(self, radius=1.0):
         """Execute complete circle mission"""
         import time
 
@@ -77,8 +77,8 @@ class DroneBlocksCircleMissionClient(Node):
 
         time.sleep(3.0)
 
-        # 3. Offboard takeoff to 3 meters (matches DroneBlocks GUI flow)
-        if not self.execute_command('offboard_takeoff', parameter=3.0, timeout=30.0):
+        # 3. Offboard takeoff to 1.5 meters (matches DroneBlocks GUI flow)
+        if not self.execute_command('offboard_takeoff', parameter=1.5, timeout=30.0):
             return False
 
         # 4. Fly in a circle
@@ -117,7 +117,7 @@ def main(args=None):
     try:
         # You can change the radius here (in meters)
         # Default is 2.0 meters
-        radius = 2.0
+        radius = 1.0
 
         success = client.run_circle_mission(radius=radius)
         if not success:

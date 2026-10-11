@@ -5,7 +5,7 @@ DroneBlocks Box Mission Example using ExecuteBlocklyCommand Service
 This example demonstrates how to chain commands together to:
 1. Start offboard heartbeat
 2. Arm the drone
-3. Takeoff to 3 meters
+3. Takeoff to 1.5 meters
 4. Fly in a 1m x 1m box pattern
 5. Land
 
@@ -75,8 +75,8 @@ class DroneBlocksMissionClient(Node):
 
         time.sleep(3.0)
 
-        # 3. Offboard takeoff to 3 meters (matches DroneBlocks GUI flow)
-        if not self.execute_command('offboard_takeoff', parameter=3.0, timeout=30.0):
+        # 3. Offboard takeoff to 1.5 meters (matches DroneBlocks GUI flow)
+        if not self.execute_command('offboard_takeoff', parameter=1.5, timeout=30.0):
             return False
 
         # 4. Fly in a 1m x 1m box pattern
