@@ -49,8 +49,8 @@ class SquarePatternFlight(Node):
         )
 
         # Flight parameters
-        self.takeoff_altitude = 3.0  # meters
-        self.square_size = 4.0       # meters per side
+        self.takeoff_altitude = 1.5  # meters
+        self.square_size = 1.0       # meters per side
         self.move_wait_time = 5.0    # seconds to wait between moves
 
         # Wait for publisher to be ready

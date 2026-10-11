@@ -42,7 +42,7 @@ class CircleOrbitFlight(Node):
         super().__init__('circle_orbit_flight')
 
         # Flight parameters
-        self.takeoff_altitude = 3.0      # meters
+        self.takeoff_altitude = 1.5      # meters
         self.circle_diameter = 1.0       # meters
         self.circle_radius = self.circle_diameter / 2.0
         self.flight_speed = 0.3          # m/s (speed along the path)
