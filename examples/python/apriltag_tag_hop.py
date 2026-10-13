@@ -1,31 +1,27 @@
 #!/usr/bin/env python3
 """
-AprilTag tag hop in Python, the same mission the DroneBlocks blocks and the
-Node-RED flow fly: center on the first tag, fly until the next tag is seen,
-center on it, repeat down the route, land.
+AprilTag tag hop in Python, the same mission as the DroneBlocks "Tag Hop" demo:
+take off over tag 0, center on it, fly forward until tag 1 is seen, center on
+it, land.
 
 Two services carry everything, both with the ExecuteBlocklyCommand request:
 
     /dexi/execute_blockly_command   the offboard manager (arm, takeoff, land, hand-off stream)
     /dexi/tag_nav/execute           the AprilTag primitives (center_on_tag, fly_until_tag, ...)
 
-Two ways to start:
+Run it with no arguments, or with the editor's Run button, to fly the demo from
+the ground: set the aircraft on tag 0 with tag 1 ahead of it. Options change
+the mission:
 
-    # Pilot hand-off (default). Fly by hand over the first tag, flip the RC
-    # Offboard switch; the mission takes over.
-    python3 apriltag_tag_hop.py --route 0 2 4
-
-    # From the ground, no pilot: arm, take off, run the route, land.
+    # A longer route at a different altitude.
     python3 apriltag_tag_hop.py --route 0 2 4 --takeoff 1.2
 
 Tag ids increase along the corridor, so a lower id than the previous one means
 "fly backward": --route 0 2 4 2 0 goes out and comes back. Transit speed is
 0.25 m/s by default; faster than ~0.3 m/s outruns the detector on a 6 in tag.
 
-One mission owner at a time: the Node-RED tag navigation flow also starts a
-mission when the pilot flips to Offboard. If that flow is deployed on the
-aircraft, press its DISENGAGE/RESET and leave the switch alone, or disable the
-flow's tab, before running this script in hand-off mode.
+To start from a pilot hand-off instead of the ground, run
+apriltag_tag_hop_handoff.py.
 """
 
 import argparse
@@ -122,19 +118,19 @@ class TagHop(Node):
         return 1
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('--route', type=int, nargs='+', default=[0, 1, 2, 3, 4], help='tag ids in flight order')
+def add_route_args(p):
+    p.add_argument('--route', type=int, nargs='+', default=[0, 1], help='tag ids in flight order (default: 0 1)')
     p.add_argument('--speed', type=float, default=0.25, help='transit speed, m/s')
-    p.add_argument('--takeoff', type=float, default=0.0, metavar='ALT', help='start from the ground at this altitude (m) instead of a pilot hand-off')
     p.add_argument('--timeout-center', type=float, default=25.0)
     p.add_argument('--timeout-transit', type=float, default=25.0)
-    args = p.parse_args()
 
+
+def fly(args, takeoff_alt):
+    """Run the route; takeoff_alt 0 waits for a pilot hand-off instead of taking off."""
     rclpy.init()
     node = TagHop()
     try:
-        code = node.run(args.route, args.speed, args.takeoff, args.timeout_center, args.timeout_transit)
+        code = node.run(args.route, args.speed, takeoff_alt, args.timeout_center, args.timeout_transit)
     except KeyboardInterrupt:
         node.get_logger().warning('interrupted; the aircraft keeps its last hold, land it from the radio')
         code = 130
@@ -142,6 +138,16 @@ def main():
         node.destroy_node()
         rclpy.try_shutdown()
     sys.exit(code)
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    add_route_args(p)
+    p.add_argument('--takeoff', type=float, default=1.5, metavar='ALT', help='takeoff altitude, m (default: 1.5)')
+    args = p.parse_args()
+    if args.takeoff <= 0:
+        p.error('--takeoff must be above 0; for a pilot hand-off run apriltag_tag_hop_handoff.py')
+    fly(args, args.takeoff)
 
 
 if __name__ == '__main__':
