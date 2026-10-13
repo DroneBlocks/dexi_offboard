@@ -697,6 +697,10 @@ void PX4OffboardManager::sendVehicleCommand(px4_msgs::msg::VehicleCommand& msg)
 
 void PX4OffboardManager::arm()
 {
+    // An arm command means the program flies the aircraft, not a pilot: end any
+    // hand-off stream left from an earlier mission (see offboardTakeoff).
+    auto_offboard_.store(true);
+
     // Start offboard heartbeat signal if not already running
     // This is needed for PX4 SITL to accept arm commands without RC
     // Note: This only starts the heartbeat signal, NOT offboard flight mode
@@ -761,6 +765,11 @@ void PX4OffboardManager::takeoff(float altitude)
 void PX4OffboardManager::offboardTakeoff(float altitude)
 {
     RCLCPP_INFO(get_logger(), "Starting offboard takeoff to %.2f meters", altitude);
+
+    // A takeoff commands OFFBOARD itself, so it ends any pilot hand-off left from an
+    // earlier mission. Otherwise the stream keeps re-latching the setpoint on the
+    // aircraft, the takeoff target is replaced by the ground and "reached" at once.
+    auto_offboard_.store(true);
 
     // Ensure offboard mode is enabled
     // This handles the case where arm() started heartbeat but didn't enable offboard mode
