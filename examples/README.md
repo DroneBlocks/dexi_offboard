@@ -50,6 +50,28 @@ cd examples/python
 python3 square_pattern.py
 ```
 
+### `python/apriltag_tag_hop.py`
+The DroneBlocks "Tag Hop" demo in Python: take off to 1.5 m over tag 0, center on it,
+fly forward until tag 1 is seen, center on it, land. Runs with no arguments (or the
+editor's Run button); options change the route, altitude and speed.
+
+**Usage:**
+```bash
+cd examples/python
+python3 apriltag_tag_hop.py                              # tag 0 to tag 1
+python3 apriltag_tag_hop.py --route 0 2 4 --takeoff 1.2
+```
+
+### `python/apriltag_tag_hop_handoff.py`
+The same route from a pilot hand-off: fly by hand over the first tag and flip the RC
+Offboard switch; the mission takes over. Flip back at any time to take the aircraft.
+
+**Usage:**
+```bash
+cd examples/python
+python3 apriltag_tag_hop_handoff.py --route 0 2 4
+```
+
 ### `python/circle_orbit.py`
 Circular orbit pattern with configurable heading modes:
 - Smooth circular flight path with 1m diameter (configurable)
