@@ -998,8 +998,10 @@ void PX4OffboardManager::setVelocityBody(float vx, float vy, float vz, float yaw
         return;
     }
 
-    // Ensure offboard mode is active
-    if (offboard_heartbeat_thread_run_flag_) {
+    // Ensure offboard mode is active, unless a pilot handed the aircraft over: then the
+    // pilot owns the Offboard switch, and re-entering Offboard here would undo their
+    // switch back to Position (tag centering sends velocities several times a second).
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1067,7 +1069,7 @@ void PX4OffboardManager::sendTrajectorySetpointVelocity(float vx, float vy, floa
 void PX4OffboardManager::flyForward(float distance)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1088,7 +1090,7 @@ void PX4OffboardManager::flyForward(float distance)
 void PX4OffboardManager::flyBackward(float distance)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1109,7 +1111,7 @@ void PX4OffboardManager::flyBackward(float distance)
 void PX4OffboardManager::flyRight(float distance)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1130,7 +1132,7 @@ void PX4OffboardManager::flyRight(float distance)
 void PX4OffboardManager::flyLeft(float distance)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1151,7 +1153,7 @@ void PX4OffboardManager::flyLeft(float distance)
 void PX4OffboardManager::flyUp(float distance)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1171,7 +1173,7 @@ void PX4OffboardManager::flyUp(float distance)
 void PX4OffboardManager::flyDown(float distance)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1191,7 +1193,7 @@ void PX4OffboardManager::flyDown(float distance)
 void PX4OffboardManager::yawLeft(float angle)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
@@ -1215,7 +1217,7 @@ void PX4OffboardManager::yawLeft(float angle)
 void PX4OffboardManager::yawRight(float angle)
 {
     // Ensure offboard mode is active (needed after native takeoff)
-    if (offboard_heartbeat_thread_run_flag_) {
+    if (offboard_heartbeat_thread_run_flag_ && auto_offboard_.load()) {
         enableOffboardMode();
     }
 
