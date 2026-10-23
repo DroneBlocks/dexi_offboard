@@ -167,6 +167,7 @@ private:
     void sendTrajectorySetpointVelocity(float vx, float vy, float vz, float yawspeed);
 
     // Target reached detection
+    void followEkfResets(const px4_msgs::msg::VehicleLocalPosition &msg);
     bool isTargetReached();
     void setTarget(double x, double y, double z, double heading);
     void clearTarget();

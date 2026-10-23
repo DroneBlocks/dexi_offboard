@@ -257,6 +257,7 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
         z_ = msg->z;
         heading_ = msg->heading;
         dist_bottom_ = msg->dist_bottom;
+        followEkfResets(*msg);
         last_local_pos_ = *msg;
         have_local_pos_ = true;
     }
@@ -275,6 +276,32 @@ void PX4OffboardManager::vehicleLocalPosCallback(const px4_msgs::msg::VehicleLoc
         // commanded point; re-latching where the vehicle is now would leave a
         // takeoff up to a tolerance short of its height.
         target_active_.store(false);
+    }
+}
+
+// EKF2 resets (GPS lost -> external vision, GPS back, a yaw reset) jump the local frame.
+// Every setpoint this node holds is absolute in that frame, so carry it across the reset
+// by the same delta, the way PX4's own flight tasks do: the aircraft stays where it is
+// instead of lurching by the reset. Called under state_mutex_.
+void PX4OffboardManager::followEkfResets(const px4_msgs::msg::VehicleLocalPosition &msg)
+{
+    if (!have_local_pos_) return;   // first message: nothing to compare against
+    const auto &prev = last_local_pos_;
+    if (msg.xy_reset_counter != prev.xy_reset_counter) {
+        target_x_ += msg.delta_xy[0];
+        target_y_ += msg.delta_xy[1];
+        RCLCPP_WARN(get_logger(), "EKF xy reset #%u: setpoint moved by (%.3f, %.3f) m to (%.2f, %.2f)",
+                    msg.xy_reset_counter, msg.delta_xy[0], msg.delta_xy[1], target_x_, target_y_);
+    }
+    if (msg.z_reset_counter != prev.z_reset_counter) {
+        target_z_ += msg.delta_z;
+        RCLCPP_WARN(get_logger(), "EKF z reset #%u: setpoint moved by %.3f m to %.2f",
+                    msg.z_reset_counter, msg.delta_z, target_z_);
+    }
+    if (msg.heading_reset_counter != prev.heading_reset_counter) {
+        target_heading_ = std::remainder(target_heading_ + msg.delta_heading, 2.0 * M_PI);
+        RCLCPP_WARN(get_logger(), "EKF heading reset #%u: setpoint heading moved by %.2f deg to %.2f deg",
+                    msg.heading_reset_counter, msg.delta_heading * 180.0 / M_PI, target_heading_ * 180.0 / M_PI);
     }
 }
 
