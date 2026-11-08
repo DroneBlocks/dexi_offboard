@@ -972,8 +972,10 @@ void PX4OffboardManager::sendOffboardHeartbeat()
         offboard_heartbeat_.timestamp = getTimestamp();
         offboard_mode_publisher_->publish(offboard_heartbeat_);
 
+        const bool own_setpoints = auto_offboard_.load() || in_offboard_.load();
+
         // Only send setpoints if not paused (allows external nodes to control)
-        if (!setpoints_paused_) {
+        if (!setpoints_paused_ && own_setpoints) {
             if (mode == ControlMode::VELOCITY) {
                 sendTrajectorySetpointVelocity(vx, vy, vz, vyaw);
             } else {
