@@ -189,8 +189,9 @@ void KeyboardTeleop::printInstructions()
     std::cout << "  Q / q  : Quit teleop" << std::endl;
     std::cout << std::endl;
     std::cout << "NOTE: Make sure offboard heartbeat is started!" << std::endl;
-    std::cout << "      ros2 topic pub --once /dexi/offboard_manager \\" << std::endl;
-    std::cout << "        dexi_interfaces/msg/OffboardNavCommand \\" << std::endl;
+    std::cout << "      ros2 topic pub --once \\" << std::endl;
+    std::cout << "        --qos-reliability best_effort --qos-durability transient_local \\" << std::endl;
+    std::cout << "        /dexi/offboard_manager dexi_interfaces/msg/OffboardNavCommand \\" << std::endl;
     std::cout << "        \"{command: 'start_offboard_heartbeat'}\"" << std::endl;
     std::cout << std::string(50, '=') << std::endl;
     std::cout << "Ready for input (no need to press Enter)..." << std::endl;
