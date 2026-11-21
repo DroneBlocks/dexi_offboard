@@ -1,4 +1,6 @@
 #include "dexi_offboard/px4_offboard_manager.hpp"
+#include <rclcpp/experimental/executors/events_executor/events_executor.hpp>
+#include <thread>
 
 PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
 : Node("px4_offboard_manager", options),
@@ -22,7 +24,7 @@ PX4OffboardManager::PX4OffboardManager(const rclcpp::NodeOptions &options)
 
     // Create callback group for service to run in separate thread
     service_callback_group_ = this->create_callback_group(
-        rclcpp::CallbackGroupType::MutuallyExclusive);
+        rclcpp::CallbackGroupType::MutuallyExclusive, false);
 
     // Initialize publishers, subscribers, services, and timer
     initializePublishers();
@@ -1387,14 +1389,25 @@ int main(int argc, char* argv[])
 {
     rclcpp::init(argc, argv);
 
-    // Use MultiThreadedExecutor to allow service callbacks and subscribers
-    // to run concurrently - this is essential for the blocking service call
-    // to work while position updates continue to be processed
+    // The flight-command services block for the length of a maneuver while
+    // subscriptions and timers keep running, so the two run on separate threads:
+    // the services on their own single-threaded executor, everything else on an
+    // EventsExecutor. The EventsExecutor does not rebuild a wait set on every
+    // wake-up; with the MultiThreadedExecutor that bookkeeping was most of this
+    // node's ~12% of a CM5 core while idle (perf), driven by the ~83 Hz local
+    // position stream.
     auto node = std::make_shared<PX4OffboardManager>();
-    rclcpp::executors::MultiThreadedExecutor executor;
+
+    rclcpp::executors::SingleThreadedExecutor service_executor;
+    service_executor.add_callback_group(node->service_callback_group(), node->get_node_base_interface());
+    std::thread service_thread([&service_executor]() { service_executor.spin(); });
+
+    rclcpp::experimental::executors::EventsExecutor executor;
     executor.add_node(node);
     executor.spin();
 
+    service_executor.cancel();
+    service_thread.join();
     rclcpp::shutdown();
     return 0;
 }
