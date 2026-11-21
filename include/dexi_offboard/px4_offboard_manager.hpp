@@ -29,6 +29,10 @@ public:
     PX4OffboardManager(const rclcpp::NodeOptions &options = rclcpp::NodeOptions());
     ~PX4OffboardManager();
 
+    // The blocking flight-command services. Not added to an executor with the node;
+    // main() spins it on its own thread (see there).
+    rclcpp::CallbackGroup::SharedPtr service_callback_group() const { return service_callback_group_; }
+
 private:
     // QoS profile
     rclcpp::QoS qos_profile_;
